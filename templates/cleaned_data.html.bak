@@ -1,0 +1,285 @@
+{% extends "base.html" %}
+
+{% block title %}Data Cleaning - Marema Textile{% endblock %}
+{% block page_title %}Data Cleaning{% endblock %}
+{% block page_title_mobile %}Data Cleaning{% endblock %}
+
+{% block content %}
+<div class="page-heading">
+    <h4>Hasil Data Cleaning</h4>
+    <p>Ringkasan proses validasi dan pembersihan data transaksi.</p>
+</div>
+
+<!-- Statistik Cleaning -->
+<div class="row g-3 mb-4">
+    <div class="col-sm-6 col-xl-3">
+        <div class="stat-card">
+            <div class="stat-icon blue"><i class="bi bi-inbox"></i></div>
+            <div>
+                <div class="stat-label">Data Mentah</div>
+                <div class="stat-value">{{ stats.total_raw | int if stats else '0' }}</div>
+                <div class="stat-sub">Total baris yang di-upload</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-sm-6 col-xl-3">
+        <div class="stat-card">
+            <div class="stat-icon green"><i class="bi bi-check-circle"></i></div>
+            <div>
+                <div class="stat-label">Data Valid</div>
+                <div class="stat-value">{{ stats.total_clean | int if stats else '0' }}</div>
+                <div class="stat-sub">Siap untuk analisis</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-sm-6 col-xl-3">
+        <div class="stat-card">
+            <div class="stat-icon" style="background:#fef2f2;color:#dc2626;"><i class="bi bi-x-circle"></i></div>
+            <div>
+                <div class="stat-label">Transaksi Batal</div>
+                <div class="stat-value">{{ stats.total_batal | int if stats else '0' }}</div>
+                <div class="stat-sub">Status bukan "Selesai"</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-sm-6 col-xl-3">
+        <div class="stat-card">
+            <div class="stat-icon amber"><i class="bi bi-exclamation-triangle"></i></div>
+            <div>
+                <div class="stat-label">Tidak Valid</div>
+                <div class="stat-value">{{ stats.total_invalid | int if stats else '0' }}</div>
+                <div class="stat-sub">Data kosong / format salah</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Progress Bar + Info -->
+<div class="row g-3 mb-4">
+    <div class="col-lg-8">
+        <div class="card mb-3">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <span class="fw-600">Tingkat Data Valid</span>
+                    <span class="fw-bold text-success" style="font-size:1.1rem;">{{ stats.pct_valid if stats else 0 }}%</span>
+                </div>
+                {% set pct = stats.pct_valid if stats else 0 %}
+                <div class="progress" style="height:10px;">
+                    <div class="progress-bar {% if pct >= 80 %}bg-success{% elif pct >= 50 %}bg-warning{% else %}bg-danger{% endif %}"
+                         style="width:{{ pct }}%;" role="progressbar"></div>
+                </div>
+                <div class="d-flex justify-content-between mt-2" style="font-size:0.78rem;color:#6b7280;">
+                    <span>0%</span>
+                    <span>{{ stats.total_clean if stats else 0 }} dari {{ stats.total_raw if stats else 0 }} transaksi</span>
+                    <span>100%</span>
+                </div>
+
+                <div class="row g-2 mt-3">
+                    <div class="col-sm-4">
+                        <div class="d-flex align-items-center gap-2 p-2 bg-light rounded-2" style="font-size:0.82rem;">
+                            <i class="bi bi-file-earmark text-primary"></i>
+                            <span class="text-muted">File:</span>
+                            <span class="fw-500 text-truncate">{{ active_session.filename }}</span>
+                        </div>
+                    </div>
+                    <div class="col-sm-4">
+                        <div class="d-flex align-items-center gap-2 p-2 bg-light rounded-2" style="font-size:0.82rem;">
+                            <i class="bi bi-box-seam text-success"></i>
+                            <span class="text-muted">Produk:</span>
+                            <span class="fw-500">{{ total_produk }} jenis</span>
+                        </div>
+                    </div>
+                    <div class="col-sm-4">
+                        <div class="d-flex align-items-center gap-2 p-2 bg-light rounded-2" style="font-size:0.82rem;">
+                            <i class="bi bi-shield-check {% if stats and stats.has_status_col %}text-success{% else %}text-warning{% endif %}"></i>
+                            <span class="text-muted">Filter status:</span>
+                            <span class="fw-500 {% if stats and stats.has_status_col %}text-success{% else %}text-warning{% endif %}">
+                                {% if stats and stats.has_status_col %}Aktif{% else %}Tidak ada kolom{% endif %}
+                            </span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Detail Proses Preprocessing -->
+        <div class="card mb-3">
+            <div class="card-header">
+                <span class="fw-600"><i class="bi bi-funnel text-primary me-2"></i>Detail Proses Preprocessing</span>
+            </div>
+            <div class="card-body p-4">
+                <div class="position-relative">
+                    <!-- Garis penghubung -->
+                    <div class="position-absolute h-100" style="left: 19px; top: 0; width: 2px; background-color: #e5e7eb;"></div>
+                    
+                    <!-- Step 1: Raw -->
+                    <div class="d-flex mb-4 position-relative z-1">
+                        <div class="rounded-circle bg-primary text-white d-flex align-items-center justify-content-center me-3 flex-shrink-0" style="width:40px; height:40px;">
+                            <i class="bi bi-database"></i>
+                        </div>
+                        <div class="pt-2 w-100">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <h6 class="mb-1 fw-bold">Data Awal (Raw Data)</h6>
+                                <span class="badge bg-secondary" style="font-size:0.85rem;">{{ stats.total_raw if stats else 0 }} baris</span>
+                            </div>
+                            <p class="text-muted small mb-0">Total baris dari seluruh file yang di-upload ke dataset ini.</p>
+                        </div>
+                    </div>
+
+                    <!-- Step 2: Batal -->
+                    <div class="d-flex mb-4 position-relative z-1">
+                        <div class="rounded-circle bg-danger text-white d-flex align-items-center justify-content-center me-3 flex-shrink-0" style="width:40px; height:40px;">
+                            <i class="bi bi-cart-x"></i>
+                        </div>
+                        <div class="pt-2 w-100">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <h6 class="mb-1 fw-bold text-danger">Pemeriksaan Status Transaksi</h6>
+                                <span class="badge bg-danger" style="font-size:0.85rem;">- {{ stats.total_batal if stats else 0 }} baris</span>
+                            </div>
+                            <p class="text-muted small mb-0">Penghapusan data dengan status Batal / Refund / Gagal.</p>
+                        </div>
+                    </div>
+
+                    <!-- Step 3: Kosong / Non-Item -->
+                    <div class="d-flex mb-4 position-relative z-1">
+                        <div class="rounded-circle bg-warning text-dark d-flex align-items-center justify-content-center me-3 flex-shrink-0" style="width:40px; height:40px;">
+                            <i class="bi bi-scissors"></i>
+                        </div>
+                        <div class="pt-2 w-100">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <h6 class="mb-1 fw-bold text-warning" style="color:#d97706 !important;">Filter Data Tidak Valid & Non-Item</h6>
+                                <span class="badge bg-warning text-dark" style="font-size:0.85rem;">- {{ stats.total_invalid if stats else 0 }} baris</span>
+                            </div>
+                            <p class="text-muted small mb-0">Pemeriksaan data kosong dan penghapusan produk non-item (contoh: Klip Backdrop, Ongkos Jahit).</p>
+                        </div>
+                    </div>
+
+                    <!-- Step 4: Cleaned -->
+                    <div class="d-flex position-relative z-1">
+                        <div class="rounded-circle bg-success text-white d-flex align-items-center justify-content-center me-3 flex-shrink-0" style="width:40px; height:40px;">
+                            <i class="bi bi-check2-circle"></i>
+                        </div>
+                        <div class="pt-2 w-100">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <h6 class="mb-1 fw-bold text-success">Data Akhir (Cleaned Data)</h6>
+                                <span class="badge bg-success" style="font-size:0.9rem;">{{ stats.total_clean if stats else 0 }} baris</span>
+                            </div>
+                            <p class="text-muted small mb-0">Dataset bersih yang tervalidasi dan siap digunakan untuk analisis.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tabel Data -->
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <div>
+                    <span class="fw-600"><i class="bi bi-table me-2 text-success"></i>Data Hasil Cleaning</span>
+                    <span class="text-muted fw-normal ms-2" style="font-size:0.78rem;">Hanya transaksi valid</span>
+                </div>
+                <span class="badge bg-success text-white" style="font-size:0.78rem;">{{ stats.total_clean if stats else 0 }} baris</span>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive" style="max-height:450px;overflow-y:auto;">
+                    <table class="table mb-0">
+                        <thead>
+                            <tr>
+                                <th class="ps-4" style="width:50px;">No</th>
+                                <th style="width:170px;">ID Transaksi</th>
+                                <th style="width:120px;">Tanggal</th>
+                                <th>Nama Produk</th>
+                                <th class="text-center" style="width:100px;">Jumlah</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for row in transaksi %}
+                            <tr>
+                                <td class="ps-4 text-muted">{{ loop.index }}</td>
+                                <td class="fw-500">{{ row['id_transaksi'] }}</td>
+                                <td class="text-muted">{{ row['tanggal'] }}</td>
+                                <td>{{ row['produk'] }}</td>
+                                <td class="text-center">
+                                    <span class="badge bg-success text-white">{{ row['jumlah'] }}</span>
+                                </td>
+                            </tr>
+                            {% else %}
+                            <tr>
+                                <td colspan="5" class="text-center py-5 text-muted">
+                                    <i class="bi bi-folder2-open d-block fs-2 mb-2 text-muted"></i>
+                                    Belum ada data hasil cleaning.
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Sidebar -->
+    <div class="col-lg-4">
+        <div class="card mb-3">
+            <div class="card-header">
+                <i class="bi bi-arrow-right-circle me-2 text-primary"></i>Lanjut ke Analisis
+            </div>
+            <div class="card-body d-grid gap-2">
+                <a href="/moving_average" class="btn btn-outline-primary text-start d-flex align-items-center gap-2">
+                    <i class="bi bi-graph-up-arrow"></i> Estimasi Kebutuhan
+                </a>
+                <a href="/apriori" class="btn btn-outline-secondary text-start d-flex align-items-center gap-2">
+                    <i class="bi bi-diagram-3"></i> Analisis Produk
+                </a>
+                <hr class="my-1">
+                <a href="/upload" class="btn btn-outline-secondary btn-sm text-start d-flex align-items-center gap-2">
+                    <i class="bi bi-upload"></i> Upload Data Baru
+                </a>
+            </div>
+        </div>
+
+        <!-- Log Cleaning -->
+        <div class="card">
+            <div class="card-header">
+                <i class="bi bi-journal-text me-2 text-info"></i>Log Proses Cleaning
+            </div>
+            <div class="card-body" style="font-size:0.85rem;">
+                {% if cleaning_reasons %}
+                    {% for reason in cleaning_reasons %}
+                    <div class="d-flex align-items-start gap-2 mb-2">
+                        <i class="bi bi-arrow-right text-warning" style="margin-top:2px;"></i>
+                        <span class="text-muted">{{ reason }}</span>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                <div class="d-flex align-items-center gap-2 text-muted">
+                    <i class="bi bi-check-circle text-success"></i>
+                    Cleaning selesai tanpa baris yang dibuang.
+                </div>
+                {% endif %}
+
+                <hr class="my-2">
+                <div class="d-flex justify-content-between" style="font-size:0.82rem;">
+                    <span class="text-muted">Data mentah:</span>
+                    <span class="fw-600">{{ stats.total_raw if stats else 0 }}</span>
+                </div>
+                <div class="d-flex justify-content-between" style="font-size:0.82rem;">
+                    <span class="text-success">Data siap analisis:</span>
+                    <span class="fw-600 text-success">{{ stats.total_clean if stats else 0 }}</span>
+                </div>
+                <div class="d-flex justify-content-between" style="font-size:0.82rem;">
+                    <span class="text-danger">Data dibuang:</span>
+                    <span class="fw-600 text-danger">{{ stats.total_removed if stats else 0 }}</span>
+                </div>
+
+                {% if not (stats and stats.has_status_col) %}
+                <div class="alert alert-warning mt-3 py-2 mb-0" style="font-size:0.8rem;">
+                    <i class="bi bi-exclamation-triangle me-1"></i>
+                    Kolom status tidak ditemukan. Semua transaksi dianggap valid.
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

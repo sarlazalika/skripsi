@@ -1,0 +1,378 @@
+================================================================================
+CHECKLIST HASIL AUDIT MEKANISME UPLOAD DATA
+Aplikasi: Marema Textile System
+Tanggal Audit: 2026-09-23
+Status: ✅ SELESAI
+================================================================================
+
+INSTRUKSI AUDIT YANG DIBERIKAN
+═════════════════════════════════════════════════════════════════════════════
+
+[✅] 1. Cari route/function yang menangani upload file.
+     Status: DITEMUKAN
+     
+     Route: POST /upload
+     File: app.py
+     Baris: 223-298
+     Fungsi: upload_data()
+     
+     Penemuan:
+     • Menerima file CSV/XLSX
+     • Validasi format file
+     • Baca file dan deteksi mapping kolom otomatis
+     • INSERT sesi baru ke tabel upload_session
+     • Simpan data raw ke tabel raw_data_temp
+
+
+[✅] 2. Cari kode yang memasukkan data ke tabel transaksi, cleaned_transaksi, 
+        upload_session, dan cleaning_stats.
+        
+     Status: DITEMUKAN SEMUA
+     
+     A. Tabel: upload_session
+        Route: /upload (POST)
+        Baris: 270-276
+        Aksi: INSERT sesi baru
+        
+     B. Tabel: raw_data_temp
+        Route: /upload (POST)
+        Baris: 277-295
+        Aksi: INSERT data raw, DELETE >5 sesi lama
+        
+     C. Tabel: cleaned_transaksi
+        Route: /process_clean (POST)
+        Baris: 407-412
+        Aksi: DELETE WHERE session_id (re-clean), INSERT data bersih
+        
+     D. Tabel: cleaning_stats
+        Route: /process_clean (POST)
+        Baris: 413-425
+        Aksi: INSERT statistik cleaning
+        
+     E. Tabel: transaksi (manual input)
+        Route: /input (POST)
+        Baris: 183-191
+        Aksi: INSERT data manual
+
+
+[✅] 3. Tentukan apakah ketika upload file baru:
+        - data lama dihapus
+        - data lama ditimpa
+        - data baru ditambahkan (append)
+        - atau database dibuat ulang
+        
+     Status: DETERMINED
+     
+     JAWABAN: DATA LAMA TIDAK DIHAPUS
+     
+     Bukti:
+     ✅ Data lama TETAP tersimpan dengan session_id lama
+     ✅ Data baru di-append dengan session_id baru
+     ❌ Data lama TIDAK dihapus (kecuali manual clear_data.py)
+     ❌ Data lama TIDAK ditimpa
+     ❌ Database TIDAK dibuat ulang
+     
+     Penjelasan:
+     • Setiap upload membuat session_id baru (INSERT)
+     • Tidak ada DELETE upload_session lama sebelum INSERT baru
+     • Data dari session_id berbeda tetap terpisah di cleaned_transaksi
+     • Sesi upload lama tetap dengan status='cleaned'
+
+
+[✅] 4. Tampilkan bagian kode yang menyebabkan perilaku tersebut.
+        
+     Status: DITAMPILKAN LENGKAP
+     
+     File dibuat:
+     • AUDIT_CODE_EVIDENCE.txt (detail kode dengan analisis)
+     • AUDIT_CONCRETE_SCENARIO.txt (simulasi skenario dengan database state)
+     • AUDIT_MECHANISM.txt (detail teknis mekanisme)
+
+
+[✅] 5. Periksa apakah `clear_data.py` atau fungsi pembersihan data dipanggil 
+        otomatis saat upload.
+        
+     Status: DIPERIKSA - TIDAK ADA PEMANGGILAN OTOMATIS
+     
+     Hasil Pencarian:
+     • "clear_data" di app.py → ❌ TIDAK DITEMUKAN
+     • "import clear_data" → ❌ TIDAK DITEMUKAN
+     • "from clear_data" → ❌ TIDAK DITEMUKAN
+     • "subprocess" / "os.system" → ❌ TIDAK DITEMUKAN
+     • Kode memanggil clear_data.py → ❌ TIDAK ADA
+     
+     Kesimpulan:
+     ✅ clear_data.py HANYA dapat dijalankan MANUAL
+     ✅ Tidak dipanggil otomatis saat upload
+     ✅ Tidak dipanggil otomatis saat cleaning
+     ✅ Tidak dipanggil otomatis saat analisis
+
+
+[✅] 6. Periksa apakah setiap upload membuat `upload_session` baru atau 
+        menggantikan session sebelumnya.
+        
+     Status: DIPERIKSA - MEMBUAT SESSION BARU
+     
+     Bukti Kode (app.py, baris 270-276):
+     
+     cur = conn.execute(
+         '''INSERT INTO upload_session (...)
+            VALUES (?, ?, ?, ?, ?)''',
+         (...)
+     )
+     session_id = cur.lastrowid
+     
+     Analisis:
+     ✅ Menggunakan INSERT (bukan UPDATE/DELETE)
+     ✅ Setiap upload membuat record BARU
+     ✅ session_id adalah ID dari record terbaru
+     ✅ Session lama TIDAK dihapus/diganti
+     
+     Verifikasi Database:
+     • Jika upload file1 → upload_session.id = 1
+     • Jika upload file2 → upload_session.id = 2
+     • Jika upload file3 → upload_session.id = 3
+     • Semua session TETAP ada di database
+
+
+[✅] 7. Jangan mengubah database.
+     
+     Status: DIPENUHI ✓
+     
+     Aksi yang dilakukan:
+     • Hanya READ database (SELECT queries)
+     • Tidak ada perubahan data
+     • Tidak ada DELETE/UPDATE/INSERT data
+     • Hanya pemeriksaan struktur tabel
+
+
+[✅] 8. Jangan mengubah kode.
+     
+     Status: DIPENUHI ✓
+     
+     Aksi yang dilakukan:
+     • Hanya membaca file app.py, preprocessor.py, moving_average.py
+     • Tidak ada edit file kode
+     • Tidak ada modifikasi logic
+     • Hanya analisis statis
+
+
+[✅] 9. Jangan menghapus data apa pun.
+     
+     Status: DIPENUHI ✓
+     
+     Aksi yang dilakukan:
+     • Tidak ada kode yang menjalankan DELETE
+     • Tidak ada truncate tabel
+     • Semua data tetap aman
+
+
+[✅] 10. Berikan rekomendasi untuk kebutuhan skripsi:
+         - satu file upload berisi seluruh data penelitian, atau
+         - beberapa file boleh di-upload bertahap dan datanya di-append
+         
+     Status: REKOMENDASI DIBERIKAN
+     
+     REKOMENDASI UTAMA: SATU FILE (STRONGLY RECOMMENDED) ✅
+     
+     Alasan:
+     ✅ Data tetap konsisten dalam satu sesi
+     ✅ Analisis Apriori & Moving Average mencakup semua data
+     ✅ Dashboard menampilkan data lengkap
+     ✅ Sesuai dengan standar penelitian (1 period = 1 analysis)
+     ✅ Dokumentasi lebih mudah dan jelas
+     
+     ALTERNATIVE: MULTIPLE FILES (Tidak disarankan, perlu modifikasi)
+     
+     Masalah:
+     ❌ UI hanya tampilkan sesi terbaru → data awal "hilang" dari view
+     ❌ Analisis hanya untuk sesi terbaru
+     ❌ Perlu modifikasi code untuk merge multiple sessions
+     ❌ Perlu update 3-4 route berbeda
+     ❌ Dokumentasi penelitian menjadi kompleks
+     
+     Solusi jika tetap multiple files:
+     1. Modifikasi /process_clean untuk SKIP session limit
+     2. Update /cleaned_data, /apriori, /moving_average
+     3. Buat query yang SELECT tanpa WHERE session_id
+     4. Update dashboard untuk tampil periode range
+     5. Tambah UI untuk select/filter session
+
+
+═════════════════════════════════════════════════════════════════════════════
+
+DOKUMENTASI AUDIT YANG DIHASILKAN
+═════════════════════════════════════════════════════════════════════════════
+
+File 1: AUDIT_SUMMARY.txt (file ini)
+     └─ Ringkasan ekskutif dengan checklist
+     └─ Temuan utama dan kesimpulan
+     └─ Rekomendasi implementasi
+
+File 2: AUDIT_UPLOAD_MECHANISM.txt
+     └─ Penjelasan detail mekanisme upload (8 sections)
+     └─ Visualisasi struktur database
+     └─ Penjelasan setiap tahap pipeline
+
+File 3: AUDIT_CODE_EVIDENCE.txt
+     └─ Evidence kode spesifik dari app.py
+     └─ Potongan kode dengan analisis
+     └─ Trace seluruh flow dari upload sampai analisis
+
+File 4: AUDIT_CONCRETE_SCENARIO.txt
+     └─ Simulasi konkret upload 2 file secara bertahap
+     └─ Database state sebelum & sesudah setiap step
+     └─ Menunjukkan bagaimana data TETAP ADA tapi "tidak terlihat"
+
+File 5: PROJECT_STATUS.txt
+     └─ Status kondisi project setelah pembersihan data
+     └─ Verifikasi database structure & aplikasi running
+
+File 6: AUDIT_MECHANISM.txt (ini = AUDIT_SUMMARY.txt)
+     └─ Verifikasi semua checklist audit selesai
+
+
+═════════════════════════════════════════════════════════════════════════════
+
+RINGKASAN TEMUAN TEKNIS
+═════════════════════════════════════════════════════════════════════════════
+
+1. PIPELINE UPLOAD (3 TAHAP)
+   ├─ Tahap 1: Upload (/upload)
+   │  └─ INSERT sesi baru → session_id dibuat
+   │  └─ Simpan raw data dengan session_id terikat
+   │  └─ Status = 'pending'
+   │
+   ├─ Tahap 2: Preview (/preview)
+   │  └─ Tampilkan preview dari session_id terkini
+   │  └─ Pengguna validasi mapping kolom
+   │
+   └─ Tahap 3: Cleaning (/process_clean)
+      └─ DELETE cleaned_transaksi WHERE session_id (re-clean)
+      └─ INSERT data bersih dengan session_id terikat
+      └─ Status = 'cleaned'
+
+
+2. PENYEBAB DATA LAMA "TIDAK TERLIHAT"
+   ├─ Fungsi get_active_session()
+   │  └─ ORDER BY id DESC LIMIT 1
+   │  └─ Ambil HANYA sesi terbaru
+   │
+   └─ Dashboard & Analisis
+      └─ WHERE session_id = active['id']
+      └─ Hanya tampilkan data dari sesi aktif
+      └─ Data dari sesi lama tetap ada tapi tidak ditampilkan
+
+
+3. STRUKTUR DATABASE
+   ├─ upload_session (1 record per upload)
+   ├─ cleaned_transaksi (banyak records, grouped by session_id)
+   ├─ cleaning_stats (1 record per session)
+   └─ raw_data_temp (temp, dihapus >5 sesi lalu)
+
+
+4. FLOW DATA
+   [Upload File] → [session_id baru] → [raw_data_temp]
+                                     ↓
+                              [Preview Data]
+                                     ↓
+                        [Process Clean & Validate]
+                                     ↓
+                    [cleaned_transaksi + cleaning_stats]
+                                     ↓
+                    [Display di UI - hanya session aktif]
+
+
+═════════════════════════════════════════════════════════════════════════════
+
+REKOMENDASI AKSI LANJUTAN
+═════════════════════════════════════════════════════════════════════════════
+
+OPSI A: Tetap dengan desain saat ini (RECOMMENDED)
+─────────────────────────────────────────────────
+Status: ✅ BAIK UNTUK SKRIPSI
+Aksi: Tidak perlu modifikasi kode
+
+Untuk Implementasi Skripsi:
+□ Gunakan 1 file yang berisi semua data penelitian
+□ Upload → Clean → Analisis
+□ Export laporan
+□ Dokumentasi penelitian lengkap
+
+Waktu Implementasi: ~4-5 hari
+
+
+OPSI B: Modifikasi untuk support multiple session analysis (ADVANCED)
+───────────────────────────────────────────────────────────────────────
+Status: ⚠️ PERLU CODING
+Aksi: Modifikasi 4-5 route dan query
+
+Modifikasi yang diperlukan:
+□ Update get_active_session() → return multiple sessions
+□ Modifikasi /cleaned_data untuk tampil semua session
+□ Modifikasi /apriori untuk MERGE data multiple sessions
+□ Modifikasi /moving_average untuk analisis gabungan
+□ Update UI untuk period selector
+□ Testing perubahan
+
+Waktu: ~3-5 hari
+
+Benefit: Bisa upload bertahap dan analisis gabungan
+
+
+═════════════════════════════════════════════════════════════════════════════
+
+REKOMENDASI FINAL UNTUK SKRIPSI
+═════════════════════════════════════════════════════════════════════════════
+
+✅ GUNAKAN OPSI A (TIDAK PERLU MODIFIKASI)
+
+Alasan:
+1. Desain saat ini sudah baik dan working
+2. Problem "data hilang" adalah design limitation (UI)
+3. Data sebenarnya tidak hilang, hanya tidak ditampilkan
+4. Untuk penelitian: 1 file comprehensive lebih baik dari multiple files
+5. Lebih sederhana, lebih konsisten, kurang error
+
+Implementasi Skripsi:
+1. Kumpulkan data Marema Textile 1 period (misal: Jan-Jun 2026)
+2. Buat 1 file CSV dengan SEMUA transaksi
+3. Upload SATU KALI
+4. Clean & Analisis
+5. Export laporan
+
+Estimasi Waktu:
+• Persiapan data: 1-2 hari
+• Upload & processing: 1-2 jam
+• Analisis: 2-3 jam
+• Dokumentasi: 1-2 jam
+• TOTAL: 2-4 hari
+
+
+═════════════════════════════════════════════════════════════════════════════
+
+STATUS AUDIT: ✅ SELESAI - SIAP UNTUK INSTRUKSI LANJUTAN
+═════════════════════════════════════════════════════════════════════════════
+
+Semua instruksi audit telah dilakukan:
+✅ Identifikasi route/function upload
+✅ Cari kode INSERT data ke semua tabel
+✅ Tentukan mekanisme (append/replace/delete)
+✅ Tampilkan evidence kode spesifik
+✅ Verifikasi clear_data.py tidak otomatis
+✅ Konfirmasi session baru dibuat setiap upload
+✅ Database tidak diubah
+✅ Kode tidak diubah
+✅ Data tidak dihapus
+✅ Rekomendasi diberikan (1 file recommended)
+
+Dokumentasi lengkap tersedia:
+📄 AUDIT_SUMMARY.txt (ringkasan ini)
+📄 AUDIT_UPLOAD_MECHANISM.txt (detail mekanisme)
+📄 AUDIT_CODE_EVIDENCE.txt (evidence kode)
+📄 AUDIT_CONCRETE_SCENARIO.txt (simulasi scenario)
+
+Menunggu instruksi berikutnya dari pengguna.
+
+
+═════════════════════════════════════════════════════════════════════════════

@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+
+{% block title %}Estimasi Kebutuhan - Marema Textile{% endblock %}
+{% block page_title %}Estimasi Kebutuhan{% endblock %}
+{% block page_title_mobile %}Estimasi{% endblock %}
+
+{% block content %}
+<div class="page-heading">
+    <h4>Estimasi Kebutuhan Stok (Moving Average)</h4>
+    <p>Proyeksi kebutuhan pengadaan produk minggu depan berdasarkan rata-rata penjualan historis.</p>
+</div>
+
+{% if active_session %}
+<div class="alert alert-success d-flex align-items-center gap-2 mb-4 py-2 px-3" style="font-size:0.85rem;">
+    <i class="bi bi-database-check"></i>
+    <span><strong>Sumber Data:</strong> {{ active_session.filename }}</span>
+    {% if data_stats %}
+    <span class="ms-3 text-muted">{{ data_stats.total_clean }} transaksi valid</span>
+    {% endif %}
+    <a href="/cleaned_data" class="btn btn-sm btn-outline-success ms-auto px-3" style="font-size:0.8rem;">Lihat Data</a>
+</div>
+{% endif %}
+
+<!-- Form Parameter -->
+<div class="card mb-4">
+    <div class="card-header">
+        <i class="bi bi-sliders me-2"></i>Parameter Perhitungan
+    </div>
+    <div class="card-body">
+        <form class="row g-3 align-items-end" method="GET">
+            <div class="col-md-5">
+                <label for="window" class="form-label">Periode Perhitungan (Minggu)</label>
+                <div class="input-group">
+                    <span class="input-group-text bg-light text-muted"><i class="bi bi-calendar-week"></i></span>
+                    <input type="number" min="2" max="52" class="form-control" name="window" value="{{ window }}" required>
+                    <span class="input-group-text bg-light text-muted">minggu</span>
+                </div>
+                <small class="text-muted">Rentang data historis yang digunakan untuk menghitung rata-rata (default penelitian: 12 minggu).</small>
+            </div>
+            <div class="col-md-3">
+                <button type="submit" class="btn btn-primary w-100">
+                    <i class="bi bi-calculator me-2"></i>Hitung Estimasi
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+{% if validation %}
+<!-- Validasi Model -->
+<div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-shield-check me-2 text-primary"></i>Validasi Model (Akurasi Prediksi)</span>
+        <span class="badge bg-primary rounded-pill">{{ validation.n_data }} Data Evaluasi</span>
+    </div>
+    <div class="card-body">
+        <div class="row g-4">
+            <div class="col-md-6">
+                <div class="d-flex align-items-center mb-2">
+                    <h5 class="mb-0 fw-bold me-2">MAE</h5>
+                    <span class="badge bg-light text-dark border">Mean Absolute Error</span>
+                </div>
+                <div class="fs-4 fw-bold text-primary mb-1">{{ validation.mae }} unit</div>
+                <p class="text-muted small mb-0">
+                    <i class="bi bi-info-circle me-1"></i>Menunjukkan rata-rata besar kesalahan absolut antara nilai aktual dan prediksi Moving Average. Semakin kecil angkanya, semakin akurat modelnya.
+                </p>
+            </div>
+            <div class="col-md-6">
+                <div class="d-flex align-items-center mb-2">
+                    <h5 class="mb-0 fw-bold me-2">MAPE</h5>
+                    <span class="badge bg-light text-dark border">Mean Absolute Percentage Error</span>
+                </div>
+                <div class="fs-4 fw-bold text-success mb-1">{{ validation.mape }}%</div>
+                <p class="text-muted small mb-0">
+                    <i class="bi bi-info-circle me-1"></i>Menunjukkan rata-rata persentase kesalahan prediksi. <em>Catatan:</em> Transaksi bernilai 0 unit diabaikan dalam perhitungan untuk menghindari pembagian nol (<em>infinity</em>).
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<!-- Tabel Hasil -->
+<div class="card">
+    <div class="card-header">
+        <i class="bi bi-table me-2 text-success"></i>Hasil Estimasi Kebutuhan Minggu Depan
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table mb-0">
+                <thead>
+                    <tr>
+                        <th class="ps-4">Nama Produk</th>
+                        <th class="text-center" style="width:190px;">Penjualan Minggu Terakhir</th>
+                        <th class="text-center" style="width:180px;">Rata-rata ({{ window }} Minggu)</th>
+                        <th class="text-center" style="width:200px;">Estimasi Minggu Depan</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in results %}
+                    <tr>
+                        <td class="ps-4 fw-500">{{ item['produk'] }}</td>
+                        <td class="text-center">
+                            <span class="badge bg-secondary text-white">{{ item['last_week_sales'] }} unit</span>
+                        </td>
+                        <td class="text-center text-muted">{{ "%.2f"|format(item['moving_avg']) }} unit</td>
+                        <td class="text-center">
+                            <span class="badge bg-success text-white fw-bold px-3">
+                                {{ item['prediction']|int }} Unit
+                            </span>
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="4" class="text-center py-5 text-muted">
+                            <i class="bi bi-exclamation-triangle d-block fs-3 mb-2 text-warning"></i>
+                            Data transaksi tidak mencukupi. Minimal dibutuhkan data selama <strong>{{ window }} minggu</strong>.
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    <div class="card-footer bg-light border-top py-3 px-4" style="font-size:0.82rem;color:#6b7280;">
+        <i class="bi bi-info-circle me-2 text-primary"></i>
+        <strong>Catatan:</strong> Estimasi dihitung dengan Simple Moving Average (SMA) skala mingguan.
+        Periode default penelitian adalah <strong>12 minggu</strong> untuk memastikan stabilitas tren historis.
+        Hanya transaksi berstatus <strong>Selesai</strong> yang digunakan dalam perhitungan.
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+
+{% block title %}Data Transaksi - Marema Textile{% endblock %}
+{% block page_title %}Data Transaksi Penjualan{% endblock %}
+{% block page_title_mobile %}Data Transaksi{% endblock %}
+
+{% block content %}
+<div class="page-heading">
+    <h4>Riwayat Transaksi Penjualan</h4>
+    <p>Seluruh riwayat transaksi (input manual maupun impor dari excel).</p>
+</div>
+
+<div class="card">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <div>
+            <i class="bi bi-hdd-stack text-primary me-2"></i>Database Transaksi
+        </div>
+        <div class="d-flex gap-2">
+            <!-- <a href="/import" class="btn btn-sm btn-outline-secondary">
+                <i class="bi bi-upload me-1"></i> Impor
+            </a> -->
+            <a href="/input" class="btn btn-sm btn-primary">
+                <i class="bi bi-plus-lg me-1"></i> Tambah Transaksi
+            </a>
+        </div>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive" style="max-height: 550px; overflow-y: auto;">
+            <table class="table mb-0">
+                <thead class="table-light sticky-top">
+                    <tr>
+                        <th class="ps-4" style="width: 60px;">No</th>
+                        <th style="width: 180px;">ID Transaksi</th>
+                        <th style="width: 150px;">Tanggal</th>
+                        <th>Nama Produk</th>
+                        <th class="text-center" style="width: 120px;">Jumlah</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in transaksi %}
+                    <tr>
+                        <td class="ps-4 text-muted">{{ loop.index }}</td>
+                        <td class="fw-500">{{ row['id_transaksi'] }}</td>
+                        <td class="text-muted">{{ row['tanggal'] }}</td>
+                        <td>{{ row['produk'] }}</td>
+                        <td class="text-center">
+                            <span class="badge bg-secondary">{{ row['jumlah'] }}</span>
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="5" class="text-center py-5 text-muted">
+                            <i class="bi bi-folder2-open d-block fs-3 mb-2"></i>
+                            <h6 class="mb-1">Belum Ada Data</h6>
+                            <p class="small mb-0">Silakan tambah transaksi manual.</p>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}

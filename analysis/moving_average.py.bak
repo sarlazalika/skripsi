@@ -1,0 +1,81 @@
+import pandas as pd
+
+def calculate_moving_average(df, window=12):
+    if df.empty:
+        return None
+    
+    # 1. Ubah kolom tanggal menjadi tipe datetime
+    df['tanggal'] = pd.to_datetime(df['tanggal'])
+    
+    # 2. Ambil batas waktu global dari keseluruhan data toko
+    global_min = df['tanggal'].min()
+    global_max = df['tanggal'].max()
+    
+    # Buat template kalender mingguan global (konsisten untuk semua produk)
+    global_idx = pd.date_range(start=global_min, end=global_max, freq='W-SUN')
+    
+    results = []
+    global_errors = []
+    global_apes = []
+    total_validation_rows = 0
+    
+    for produk in df['produk'].unique():
+        # Ambil data transaksi khusus produk ini
+        prod_data_raw = df[df['produk'] == produk]
+        
+        # Resample mingguan
+        prod_weekly = prod_data_raw.set_index('tanggal')['jumlah'].resample('W').sum()
+        
+        # PERBAIKAN: Cocokkan deret dengan kalender global. Minggu yang tidak ada transaksi otomatis diisi 0.
+        prod_weekly = prod_weekly.reindex(global_idx, fill_value=0).reset_index()
+        prod_weekly.columns = ['tanggal', 'jumlah']
+        prod_weekly = prod_weekly.sort_values('tanggal')
+        
+        # 3. Hitung Moving Average (Rata-rata bergerak mingguan)
+        prod_weekly['moving_avg'] = prod_weekly['jumlah'].rolling(window=window).mean()
+        
+        # Hitung prediksi untuk minggu ke-t (yaitu rata-rata dari window sebelumnya)
+        prod_weekly['prediksi'] = prod_weekly['moving_avg'].shift(1)
+        
+        # Hitung Error untuk validasi model
+        valid_rows = prod_weekly.dropna(subset=['prediksi'])
+        total_validation_rows += len(valid_rows)
+        
+        for _, r in valid_rows.iterrows():
+            aktual = r['jumlah']
+            prediksi = r['prediksi']
+            error = abs(aktual - prediksi)
+            global_errors.append(error)
+            
+            # Penanganan MAPE ketika aktual 0:
+            # Kita abaikan periode tersebut dari rata-rata MAPE untuk menghindari division by zero (Infinity).
+            if aktual > 0:
+                global_apes.append(error / aktual)
+        
+        # 4. Ambil baris terakhir (minggu paling baru) untuk data aktual dan prediksi minggu depan
+        last_row = prod_weekly.iloc[-1]
+        
+        # Jika data bergerak masih NaN (misal data transaksi kurang dari jumlah window)
+        moving_avg_val = last_row['moving_avg']
+        if pd.isna(moving_avg_val):
+            # Fallback ke rata-rata biasa dari semua data yang ada jika window belum terpenuhi
+            moving_avg_val = prod_weekly['jumlah'].mean()
+            
+        results.append({
+            'produk': produk,
+            'last_week_sales': int(last_row['jumlah']),
+            'moving_avg': round(moving_avg_val, 2) if not pd.isna(moving_avg_val) else 0,
+            'prediction': round(moving_avg_val, 0) if not pd.isna(moving_avg_val) else 0
+        })
+        
+    mae = sum(global_errors) / len(global_errors) if global_errors else 0
+    mape = (sum(global_apes) / len(global_apes)) * 100 if global_apes else 0
+
+    return {
+        'items': results,
+        'validation': {
+            'mae': round(mae, 2),
+            'mape': round(mape, 2),
+            'n_data': total_validation_rows
+        }
+    }

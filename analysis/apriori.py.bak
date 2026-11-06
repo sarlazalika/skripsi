@@ -1,0 +1,25 @@
+import pandas as pd
+from mlxtend.frequent_patterns import apriori, association_rules
+
+def perform_apriori(df, min_support=0.1, min_threshold=0.7):
+    if df.empty:
+        return None, None
+    
+    # 1. Transform data into transactional format
+    # Group by id_transaksi and aggregate products into a list
+    basket = (df.groupby(['id_transaksi', 'produk'])['jumlah']
+              .sum().unstack().reset_index().fillna(0)
+              .set_index('id_transaksi'))
+    
+    basket_sets = (basket >= 1).astype(int)
+    
+    # 3. Apply Apriori
+    frequent_itemsets = apriori(basket_sets, min_support=min_support, use_colnames=True)
+    
+    if frequent_itemsets.empty:
+        return None, None
+
+    # 4. Generate Association Rules
+    rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=min_threshold)
+    
+    return frequent_itemsets, rules

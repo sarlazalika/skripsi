@@ -1,0 +1,1004 @@
+import sqlite3
+import pandas as pd
+import json
+import os
+from flask import Flask, render_template, request, redirect, url_for, flash, session
+from analysis.apriori import perform_apriori
+from analysis.moving_average import calculate_moving_average
+from analysis.rekomendasi import get_restock_recommendations
+from analysis.preprocessor import (
+    detect_column_mapping, validate_structure,
+    clean_data, get_preview_data, get_mapping_display
+)
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib import colors
+import io
+
+app = Flask(__name__)
+app.secret_key = 'supersecretkey'
+DATABASE = 'database.db'
+
+# ─── Custom Jinja2 Filters ───
+@app.template_filter('format_number')
+def format_number(value):
+    """Format angka dengan pemisah ribuan."""
+    try:
+        return f"{int(value):,}".replace(",", ".")
+    except (ValueError, TypeError):
+        return value
+
+def safe_int(val):
+    if val is None:
+        return 0
+    if isinstance(val, bytes):
+        return int.from_bytes(val, 'little')
+    return int(val)
+
+# ─────────────────────────────────────────────
+# DATABASE SETUP
+# ─────────────────────────────────────────────
+
+def get_db_connection():
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    conn = get_db_connection()
+
+    # Tabel lama (input manual) — dipertahankan
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS transaksi (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id_transaksi TEXT NOT NULL,
+            tanggal DATE NOT NULL,
+            produk TEXT NOT NULL,
+            jumlah INTEGER NOT NULL
+        )
+    ''')
+
+    # Dataset: pengelompokan beberapa upload_session menjadi satu dataset penelitian
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS dataset (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nama TEXT NOT NULL,
+            status TEXT DEFAULT 'aktif',
+            dibuat TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    # Tabel baru: menyimpan info sesi upload raw terakhir
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS upload_session (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            filename TEXT NOT NULL,
+            upload_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            total_rows INTEGER DEFAULT 0,
+            column_mapping TEXT,
+            raw_preview TEXT,
+            status TEXT DEFAULT 'pending'
+        )
+    ''')
+
+    # Tambah kolom dataset_id ke upload_session jika belum ada (non-destructive)
+    try:
+        conn.execute('ALTER TABLE upload_session ADD COLUMN dataset_id INTEGER REFERENCES dataset(id)')
+    except Exception:
+        pass  # Kolom sudah ada
+
+    # Tabel baru: data hasil cleaning (sumber utama analisis)
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS cleaned_transaksi (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            id_transaksi TEXT NOT NULL,
+            tanggal DATE NOT NULL,
+            produk TEXT NOT NULL,
+            jumlah INTEGER NOT NULL,
+            FOREIGN KEY(session_id) REFERENCES upload_session(id)
+        )
+    ''')
+
+    # Tabel baru: statistik cleaning per sesi
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS cleaning_stats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL UNIQUE,
+            total_raw INTEGER DEFAULT 0,
+            total_clean INTEGER DEFAULT 0,
+            total_batal INTEGER DEFAULT 0,
+            total_invalid INTEGER DEFAULT 0,
+            cleaning_reasons TEXT,
+            has_status_col INTEGER DEFAULT 0,
+            pct_valid REAL DEFAULT 0,
+            FOREIGN KEY(session_id) REFERENCES upload_session(id)
+        )
+    ''')
+
+    conn.commit()
+    conn.close()
+
+
+init_db()
+
+
+# ─────────────────────────────────────────────
+# HELPER: dataset dan session
+# ─────────────────────────────────────────────
+
+def get_active_dataset():
+    """Kembalikan dataset aktif (status='aktif') yang paling baru."""
+    conn = get_db_connection()
+    row = conn.execute(
+        "SELECT * FROM dataset WHERE status='aktif' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    return row
+
+
+def get_dataset_session_ids(dataset_id):
+    """Kembalikan list session_id yang tergabung dalam suatu dataset dan sudah cleaned."""
+    conn = get_db_connection()
+    rows = conn.execute(
+        "SELECT id FROM upload_session WHERE dataset_id=? AND status='cleaned' ORDER BY id ASC",
+        (dataset_id,)
+    ).fetchall()
+    conn.close()
+    return [r['id'] for r in rows]
+
+
+def get_or_create_active_dataset(conn):
+    """Ambil dataset aktif. Jika belum ada, buat dataset baru secara otomatis."""
+    row = conn.execute(
+        "SELECT * FROM dataset WHERE status='aktif' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if row:
+        return row['id']
+    cur = conn.execute(
+        "INSERT INTO dataset (nama, status) VALUES (?, 'aktif')",
+        ('Dataset Penelitian',)
+    )
+    return cur.lastrowid
+
+
+def get_active_session():
+    """Kembalikan sesi upload terbaru yang sudah cleaned (untuk backward compat)."""
+    conn = get_db_connection()
+    row = conn.execute(
+        "SELECT * FROM upload_session WHERE status='cleaned' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    return row
+
+
+def get_latest_session_any():
+    """Kembalikan sesi upload terakhir apapun statusnya."""
+    conn = get_db_connection()
+    row = conn.execute(
+        "SELECT * FROM upload_session ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    return row
+
+
+def get_cleaning_stats_for_session(session_id):
+    conn = get_db_connection()
+    row = conn.execute(
+        "SELECT * FROM cleaning_stats WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    conn.close()
+    return row
+
+
+def build_session_in_clause(session_ids):
+    """Buat SQL IN clause dan params tuple dari list session_ids."""
+    if not session_ids:
+        return 'SELECT id FROM upload_session WHERE 1=0', ()
+    placeholders = ','.join('?' * len(session_ids))
+    return placeholders, tuple(session_ids)
+
+
+# ─────────────────────────────────────────────
+# ROUTES — DASHBOARD
+# ─────────────────────────────────────────────
+
+@app.route('/')
+def index():
+    conn = get_db_connection()
+
+    # Statistik dari dataset aktif (gabungan semua session dalam dataset)
+    active_dataset = get_active_dataset()
+    total_clean = 0
+    total_produk_clean = 0
+    labels = []
+    values = []
+    active = None  # untuk template (gunakan session terbaru dalam dataset)
+
+    if active_dataset:
+        session_ids = get_dataset_session_ids(active_dataset['id'])
+        if session_ids:
+            placeholders, params = build_session_in_clause(session_ids)
+
+            total_clean = conn.execute(
+                f'SELECT COUNT(*) FROM cleaned_transaksi WHERE session_id IN ({placeholders})',
+                params
+            ).fetchone()[0]
+
+            total_produk_clean = conn.execute(
+                f'SELECT COUNT(DISTINCT produk) FROM cleaned_transaksi WHERE session_id IN ({placeholders})',
+                params
+            ).fetchone()[0]
+
+            sales_data = conn.execute(f'''
+                SELECT strftime('%Y-%m', tanggal) as bulan, SUM(jumlah) as total
+                FROM cleaned_transaksi
+                WHERE session_id IN ({placeholders})
+                GROUP BY bulan
+                ORDER BY bulan DESC
+                LIMIT 6
+            ''', params).fetchall()
+
+            labels = [row['bulan'] for row in sales_data][::-1]
+            values = [row['total'] for row in sales_data][::-1]
+
+            # Ambil session terbaru dalam dataset untuk tampilan info
+            active = conn.execute(
+                "SELECT * FROM upload_session WHERE id=?", (session_ids[-1],)
+            ).fetchone()
+
+    # Statistik dari input manual (tabel transaksi lama)
+    total_manual = conn.execute('SELECT COUNT(*) FROM transaksi').fetchone()[0]
+    conn.close()
+
+    # Agregasi cleaning stats dari seluruh session dalam dataset
+    stats = None
+    if active_dataset:
+        session_ids = get_dataset_session_ids(active_dataset['id'])
+        if session_ids:
+            conn2 = get_db_connection()
+            placeholders, params = build_session_in_clause(session_ids)
+            rows = conn2.execute(
+                f'SELECT * FROM cleaning_stats WHERE session_id IN ({placeholders})', params
+            ).fetchall()
+            conn2.close()
+            if rows:
+                stats = {
+                    'total_raw': sum(safe_int(r['total_raw']) for r in rows),
+                    'total_clean': sum(safe_int(r['total_clean']) for r in rows),
+                    'total_batal': sum(safe_int(r['total_batal']) for r in rows),
+                    'total_invalid': sum(safe_int(r['total_invalid']) for r in rows),
+                    'pct_valid': round(
+                        sum(safe_int(r['total_clean']) for r in rows) /
+                        max(sum(safe_int(r['total_raw']) for r in rows), 1) * 100, 1
+                    )
+                }
+
+    return render_template('index.html',
+                           total_transaksi=total_clean,
+                           total_produk=total_produk_clean,
+                           total_manual=total_manual,
+                           labels=labels,
+                           values=values,
+                           active_session=active,
+                           active_dataset=active_dataset,
+                           cleaning_stats=stats)
+
+
+# ─────────────────────────────────────────────
+# ROUTES — INPUT MANUAL (dipertahankan)
+# ─────────────────────────────────────────────
+
+@app.route('/input', methods=['GET', 'POST'])
+def input_data():
+    if request.method == 'POST':
+        id_transaksi = request.form['id_transaksi']
+        tanggal = request.form['tanggal']
+        produk = request.form['produk']
+        jumlah = request.form['jumlah']
+
+        conn = get_db_connection()
+        conn.execute(
+            'INSERT INTO transaksi (id_transaksi, tanggal, produk, jumlah) VALUES (?, ?, ?, ?)',
+            (id_transaksi, tanggal, produk, int(jumlah))
+        )
+        conn.commit()
+        conn.close()
+        flash('Data transaksi berhasil ditambahkan!', 'success')
+        return redirect(url_for('data_transaksi'))
+
+    return render_template('input.html')
+
+
+@app.route('/data')
+def data_transaksi():
+    conn = get_db_connection()
+    transaksi = conn.execute('SELECT * FROM transaksi ORDER BY id DESC').fetchall()
+    conn.close()
+    return render_template('data.html', transaksi=transaksi)
+
+
+# ─────────────────────────────────────────────
+# ROUTES — PIPELINE: UPLOAD → PREVIEW → CLEAN
+# ─────────────────────────────────────────────
+
+@app.route('/upload', methods=['GET', 'POST'])
+def upload_data():
+    """Step 1: Upload file mentah e-commerce."""
+    if request.method == 'POST':
+        if 'file' not in request.files:
+            flash('Tidak ada file yang dipilih.', 'danger')
+            return redirect(request.url)
+
+        file = request.files['file']
+        if file.filename == '':
+            flash('Nama file kosong.', 'danger')
+            return redirect(request.url)
+
+        if not (file.filename.endswith('.csv') or file.filename.endswith('.xlsx')):
+            flash('Format file tidak didukung. Gunakan .csv atau .xlsx', 'danger')
+            return redirect(request.url)
+
+        try:
+            # Baca file mentah
+            if file.filename.endswith('.csv'):
+                # Coba beberapa encoding umum
+                try:
+                    df_raw = pd.read_csv(file, encoding='utf-8')
+                except UnicodeDecodeError:
+                    file.seek(0)
+                    df_raw = pd.read_csv(file, encoding='latin-1')
+            else:
+                df_raw = pd.read_excel(file)
+
+            if df_raw.empty:
+                flash('File kosong atau tidak memiliki data.', 'danger')
+                return redirect(request.url)
+
+            # Deteksi mapping kolom otomatis
+            mapping = detect_column_mapping(df_raw)
+            validation = validate_structure(df_raw, mapping)
+
+            # Simpan ke session upload_session
+            conn = get_db_connection()
+            cur = conn.execute(
+                '''INSERT INTO upload_session (filename, total_rows, column_mapping, raw_preview, status)
+                   VALUES (?, ?, ?, ?, ?)''',
+                (
+                    file.filename,
+                    len(df_raw),
+                    json.dumps(mapping),
+                    df_raw.head(50).fillna('').to_json(orient='records', force_ascii=False),
+                    'pending'
+                )
+            )
+            session_id = cur.lastrowid
+
+            # Simpan juga seluruh data raw (untuk proses cleaning nanti)
+            # Simpan sebagai JSON di file sementara di memori (gunakan tabel raw_data)
+            # Untuk data besar, kita simpan per-batch di tabel khusus
+            conn.execute(
+                '''CREATE TABLE IF NOT EXISTS raw_data_temp (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER,
+                    row_index INTEGER,
+                    row_data TEXT
+                )'''
+            )
+            # Hapus data temp sesi lama (>5 sesi) untuk hemat storage
+            conn.execute(
+                '''DELETE FROM raw_data_temp WHERE session_id NOT IN (
+                    SELECT id FROM upload_session ORDER BY id DESC LIMIT 5
+                )'''
+            )
+            # Simpan data baris per baris
+            rows_to_insert = [
+                (session_id, idx, json.dumps(row, ensure_ascii=False, default=str))
+                for idx, row in enumerate(df_raw.fillna('').to_dict('records'))
+            ]
+            conn.executemany(
+                'INSERT INTO raw_data_temp (session_id, row_index, row_data) VALUES (?, ?, ?)',
+                rows_to_insert
+            )
+            conn.commit()
+            conn.close()
+
+            # Simpan session_id ke flask session
+            session['upload_session_id'] = session_id
+            session['mapping'] = mapping
+            session['validation'] = validation
+
+            return redirect(url_for('preview_data'))
+
+        except Exception as e:
+            flash(f'Terjadi kesalahan saat membaca file: {str(e)}', 'danger')
+            return redirect(request.url)
+
+    return render_template('upload.html')
+
+
+@app.route('/preview')
+def preview_data():
+    """Step 2: Preview data mentah + hasil mapping kolom otomatis."""
+    session_id = session.get('upload_session_id')
+    if not session_id:
+        flash('Belum ada data yang di-upload. Silakan upload terlebih dahulu.', 'warning')
+        return redirect(url_for('upload_data'))
+
+    conn = get_db_connection()
+    upload_row = conn.execute(
+        'SELECT * FROM upload_session WHERE id=?', (session_id,)
+    ).fetchone()
+
+    if not upload_row:
+        conn.close()
+        flash('Sesi upload tidak ditemukan.', 'danger')
+        return redirect(url_for('upload_data'))
+
+    # Ambil preview data (50 baris pertama)
+    preview_json = upload_row['raw_preview']
+    preview_rows = json.loads(preview_json) if preview_json else []
+    raw_columns = list(preview_rows[0].keys()) if preview_rows else []
+
+    mapping = json.loads(upload_row['column_mapping']) if upload_row['column_mapping'] else {}
+    conn.close()
+
+    mapping_display = []
+    label_map = {
+        'id_transaksi': 'ID Transaksi',
+        'tanggal': 'Tanggal',
+        'produk': 'Nama Produk',
+        'jumlah': 'Jumlah',
+        'status': 'Status Transaksi'
+    }
+    required_fields = ['id_transaksi', 'tanggal', 'produk', 'jumlah', 'status']
+    for target in required_fields:
+        source = mapping.get(target)
+        sample = ''
+        if source and preview_rows:
+            sample = str(preview_rows[0].get(source, ''))
+            if len(sample) > 60:
+                sample = sample[:60] + '...'
+        mapping_display.append({
+            'target': target,
+            'target_label': label_map.get(target, target),
+            'source': source or '—',
+            'found': source is not None,
+            'required': target != 'status',
+            'sample': sample
+        })
+
+    # Validasi
+    required_missing = [m['target_label'] for m in mapping_display if m['required'] and not m['found']]
+    is_valid = len(required_missing) == 0
+
+    return render_template('preview.html',
+                           upload=upload_row,
+                           preview_rows=preview_rows[:20],
+                           raw_columns=raw_columns,
+                           mapping_display=mapping_display,
+                           is_valid=is_valid,
+                           required_missing=required_missing,
+                           session_id=session_id)
+
+
+@app.route('/process_clean', methods=['POST'])
+def process_clean():
+    """Step 3: Jalankan cleaning otomatis & simpan hasilnya."""
+    session_id = request.form.get('session_id', type=int)
+    if not session_id:
+        flash('Session tidak valid.', 'danger')
+        return redirect(url_for('upload_data'))
+
+    conn = get_db_connection()
+    upload_row = conn.execute(
+        'SELECT * FROM upload_session WHERE id=?', (session_id,)
+    ).fetchone()
+
+    if not upload_row:
+        conn.close()
+        flash('Sesi upload tidak ditemukan.', 'danger')
+        return redirect(url_for('upload_data'))
+
+    try:
+        # Ambil data raw dari tabel temp
+        raw_rows = conn.execute(
+            'SELECT row_data FROM raw_data_temp WHERE session_id=? ORDER BY row_index ASC',
+            (session_id,)
+        ).fetchall()
+
+        if not raw_rows:
+            conn.close()
+            flash('Data mentah tidak ditemukan. Silakan upload ulang.', 'danger')
+            return redirect(url_for('upload_data'))
+
+        records = [json.loads(r['row_data']) for r in raw_rows]
+        df_raw = pd.DataFrame(records)
+
+        # Ambil mapping (bisa ada override dari form)
+        mapping = json.loads(upload_row['column_mapping'])
+
+        # Override mapping jika pengguna mengedit di form
+        for target in ['id_transaksi', 'tanggal', 'produk', 'jumlah', 'status']:
+            form_val = request.form.get(f'map_{target}')
+            if form_val is not None:
+                mapping[target] = form_val if form_val != '__none__' else None
+
+        # Jalankan cleaning
+        df_clean, stats = clean_data(df_raw, mapping)
+
+        if df_clean.empty:
+            conn.close()
+            flash(
+                f'Hasil cleaning kosong! Dari {stats["total_raw"]} baris, '
+                f'semua data tidak valid atau berstatus Batal. Periksa kembali file Anda.',
+                'danger'
+            )
+            return redirect(url_for('preview_data'))
+
+        # Hapus data cleaned lama untuk sesi ini (jika ada)
+        # Sebelum delete, hapus juga dari transaksi untuk mencegah duplicate
+        old_cleaned = conn.execute(
+            'SELECT id_transaksi, tanggal, produk, jumlah FROM cleaned_transaksi WHERE session_id=?',
+            (session_id,)
+        ).fetchall()
+        
+        for row in old_cleaned:
+            conn.execute(
+                '''DELETE FROM transaksi WHERE id_transaksi=? AND tanggal=? AND produk=? AND jumlah=?''',
+                (row['id_transaksi'], row['tanggal'], row['produk'], row['jumlah'])
+            )
+        
+        conn.execute('DELETE FROM cleaned_transaksi WHERE session_id=?', (session_id,))
+        conn.execute('DELETE FROM cleaning_stats WHERE session_id=?', (session_id,))
+
+        # Simpan data bersih
+        rows_clean = [
+            (session_id, row['id_transaksi'], row['tanggal'], row['produk'], int(row['jumlah']))
+            for _, row in df_clean.iterrows()
+        ]
+        conn.executemany(
+            '''INSERT INTO cleaned_transaksi (session_id, id_transaksi, tanggal, produk, jumlah)
+               VALUES (?, ?, ?, ?, ?)''',
+            rows_clean
+        )
+
+        # DESIGN B: Juga simpan ke tabel transaksi untuk menu Transaksi
+        # Data yang sama, tanpa session_id (manual+upload bercampur)
+        rows_for_transaksi = [
+            (row['id_transaksi'], row['tanggal'], row['produk'], int(row['jumlah']))
+            for _, row in df_clean.iterrows()
+        ]
+        conn.executemany(
+            'INSERT INTO transaksi (id_transaksi, tanggal, produk, jumlah) VALUES (?, ?, ?, ?)',
+            rows_for_transaksi
+        )
+
+        # Simpan statistik
+        conn.execute(
+            '''INSERT INTO cleaning_stats
+               (session_id, total_raw, total_clean, total_batal, total_invalid,
+                cleaning_reasons, has_status_col, pct_valid)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+            (
+                session_id,
+                stats['total_raw'],
+                stats['total_clean'],
+                stats['total_batal'],
+                stats['total_invalid'],
+                json.dumps(stats['cleaning_reasons'], ensure_ascii=False),
+                1 if stats['has_status_col'] else 0,
+                stats['pct_valid']
+            )
+        )
+
+        # Pastikan session ini terdaftar ke dataset aktif
+        dataset_id = get_or_create_active_dataset(conn)
+        conn.execute(
+            "UPDATE upload_session SET status='cleaned', column_mapping=?, dataset_id=? WHERE id=?",
+            (json.dumps(mapping), dataset_id, session_id)
+        )
+        conn.commit()
+        conn.close()
+
+        flash(
+            f'✅ Data cleaning selesai! {stats["total_clean"]:,} transaksi siap dianalisis '
+            f'dari {stats["total_raw"]:,} data mentah.',
+            'success'
+        )
+        return redirect(url_for('cleaned_data'))
+
+    except Exception as e:
+        conn.close()
+        flash(f'Terjadi kesalahan saat proses cleaning: {str(e)}', 'danger')
+        return redirect(url_for('preview_data'))
+
+
+@app.route('/cleaned_data')
+def cleaned_data():
+    """Tampilkan hasil data cleaning + statistik + tombol aksi analisis."""
+    active_dataset = get_active_dataset()
+    if not active_dataset:
+        flash('Belum ada data yang telah diproses. Silakan upload dan cleaning terlebih dahulu.', 'warning')
+        return redirect(url_for('upload_data'))
+
+    session_ids = get_dataset_session_ids(active_dataset['id'])
+    if not session_ids:
+        flash('Belum ada data yang telah diproses. Silakan upload dan cleaning terlebih dahulu.', 'warning')
+        return redirect(url_for('upload_data'))
+
+    conn = get_db_connection()
+    placeholders, params = build_session_in_clause(session_ids)
+
+    # Data tabel — seluruh transaksi dari semua session dalam dataset aktif
+    transaksi = conn.execute(
+        f'SELECT * FROM cleaned_transaksi WHERE session_id IN ({placeholders}) ORDER BY tanggal ASC, id ASC',
+        params
+    ).fetchall()
+
+    # Agregasi statistik dari semua session
+    stat_rows = conn.execute(
+        f'SELECT * FROM cleaning_stats WHERE session_id IN ({placeholders})', params
+    ).fetchall()
+
+    # Produk unik dari seluruh dataset
+    total_produk = conn.execute(
+        f'SELECT COUNT(DISTINCT produk) FROM cleaned_transaksi WHERE session_id IN ({placeholders})',
+        params
+    ).fetchone()[0]
+
+    # Session terbaru untuk tampilan nama file
+    active = conn.execute(
+        "SELECT * FROM upload_session WHERE id=?", (session_ids[-1],)
+    ).fetchone()
+
+    conn.close()
+
+    # Gabungkan cleaning reasons dari semua session
+    cleaning_reasons = []
+    stats = None
+    if stat_rows:
+        all_reasons = []
+        for r in stat_rows:
+            if r['cleaning_reasons']:
+                all_reasons.extend(json.loads(r['cleaning_reasons']))
+        stats = {
+            'total_raw': sum(safe_int(r['total_raw']) for r in stat_rows),
+            'total_clean': sum(safe_int(r['total_clean']) for r in stat_rows),
+            'total_batal': sum(safe_int(r['total_batal']) for r in stat_rows),
+            'total_invalid': sum(safe_int(r['total_invalid']) for r in stat_rows),
+            'pct_valid': round(
+                sum(safe_int(r['total_clean']) for r in stat_rows) /
+                max(sum(safe_int(r['total_raw']) for r in stat_rows), 1) * 100, 1
+            )
+        }
+        cleaning_reasons = all_reasons
+
+    return render_template('cleaned_data.html',
+                           active_session=active,
+                           active_dataset=active_dataset,
+                           transaksi=transaksi,
+                           stats=stats,
+                           total_produk=total_produk,
+                           cleaning_reasons=cleaning_reasons,
+                           session_count=len(session_ids))
+
+
+# ─────────────────────────────────────────────
+# ROUTES — IMPORT LAMA (redirect ke pipeline baru)
+# ─────────────────────────────────────────────
+
+@app.route('/import', methods=['GET', 'POST'])
+def import_data():
+    """Redirect ke pipeline upload baru."""
+    return redirect(url_for('upload_data'))
+
+
+# ─────────────────────────────────────────────
+# ROUTES — ANALISIS (baca dari cleaned_transaksi)
+# ─────────────────────────────────────────────
+
+@app.route('/apriori')
+def apriori_analysis():
+    active_dataset = get_active_dataset()
+    if not active_dataset:
+        flash(
+            'Belum ada data yang siap dianalisis. '
+            'Silakan upload data e-commerce dan lakukan proses cleaning terlebih dahulu.',
+            'warning'
+        )
+        return redirect(url_for('upload_data'))
+
+    session_ids = get_dataset_session_ids(active_dataset['id'])
+    if not session_ids:
+        flash('Belum ada data cleaned dalam dataset aktif.', 'warning')
+        return redirect(url_for('upload_data'))
+
+    conn = get_db_connection()
+    placeholders, params = build_session_in_clause(session_ids)
+
+    # Ambil seluruh transaksi dari semua session dalam dataset aktif
+    df = pd.read_sql_query(
+        f'SELECT id_transaksi, produk, jumlah FROM cleaned_transaksi WHERE session_id IN ({placeholders})',
+        conn,
+        params=params
+    )
+
+    # Agregasi stats untuk info tampilan
+    stat_rows = conn.execute(
+        f'SELECT * FROM cleaning_stats WHERE session_id IN ({placeholders})', params
+    ).fetchall()
+    active = conn.execute(
+        "SELECT * FROM upload_session WHERE id=?", (session_ids[-1],)
+    ).fetchone()
+    conn.close()
+
+    stats = None
+    if stat_rows:
+        stats = {
+            'total_raw': sum(safe_int(r['total_raw']) for r in stat_rows),
+            'total_clean': sum(safe_int(r['total_clean']) for r in stat_rows),
+            'total_batal': sum(safe_int(r['total_batal']) for r in stat_rows),
+            'total_invalid': sum(safe_int(r['total_invalid']) for r in stat_rows),
+        }
+
+    if df.empty:
+        flash('Data cleaned masih kosong.', 'warning')
+        return redirect(url_for('cleaned_data'))
+
+    min_support = request.args.get('min_support', 0.005, type=float)
+    min_confidence = request.args.get('min_confidence', 0.5, type=float)
+
+    frequent_itemsets, rules, apriori_stats = perform_apriori(
+        df, min_support=min_support, min_threshold=min_confidence, return_stats=True
+    )
+
+    frequent_data = []
+    if frequent_itemsets is not None:
+        frequent_data = frequent_itemsets.to_dict('records')
+        for item in frequent_data:
+            item_list = list(item['itemsets'])
+            item['itemsets'] = ', '.join(item_list)
+            item['n_items'] = len(item_list)
+
+    rules_data = []
+    if rules is not None and not rules.empty:
+        rules_data = rules.to_dict('records')
+        for rule in rules_data:
+            rule['antecedents'] = ', '.join(list(rule['antecedents']))
+            rule['consequents'] = ', '.join(list(rule['consequents']))
+
+    return render_template('apriori.html',
+                           frequent_itemsets=frequent_data,
+                           rules=rules_data,
+                           apriori_stats=apriori_stats,
+                           min_support=min_support,
+                           min_confidence=min_confidence,
+                           active_session=active,
+                           active_dataset=active_dataset,
+                           data_stats=stats)
+
+
+@app.route('/rekomendasi')
+def rekomendasi_restok():
+    """
+    Integrasi Model Penelitian Skripsi:
+    Pencegahan Stockout Menggunakan Moving Average Sebagai Pemicu Algoritma Apriori pada Sistem Rekomendasi Restok
+    """
+    active_dataset = get_active_dataset()
+    if not active_dataset:
+        flash(
+            'Belum ada data yang siap dianalisis. '
+            'Silakan upload data e-commerce dan lakukan proses cleaning terlebih dahulu.',
+            'warning'
+        )
+        return redirect(url_for('upload_data'))
+
+    session_ids = get_dataset_session_ids(active_dataset['id'])
+    if not session_ids:
+        flash('Belum ada data cleaned dalam dataset aktif.', 'warning')
+        return redirect(url_for('upload_data'))
+
+    conn = get_db_connection()
+    placeholders, params = build_session_in_clause(session_ids)
+
+    df = pd.read_sql_query(
+        f'SELECT id_transaksi, tanggal, produk, jumlah FROM cleaned_transaksi WHERE session_id IN ({placeholders})',
+        conn,
+        params=params
+    )
+
+    stat_rows = conn.execute(
+        f'SELECT * FROM cleaning_stats WHERE session_id IN ({placeholders})', params
+    ).fetchall()
+    active = conn.execute(
+        "SELECT * FROM upload_session WHERE id=?", (session_ids[-1],)
+    ).fetchone()
+    conn.close()
+
+    stats = None
+    if stat_rows:
+        stats = {
+            'total_raw': sum(safe_int(r['total_raw']) for r in stat_rows),
+            'total_clean': sum(safe_int(r['total_clean']) for r in stat_rows),
+            'total_batal': sum(safe_int(r['total_batal']) for r in stat_rows),
+            'total_invalid': sum(safe_int(r['total_invalid']) for r in stat_rows),
+        }
+
+    if df.empty:
+        flash('Data cleaned masih kosong.', 'warning')
+        return redirect(url_for('cleaned_data'))
+
+    window = request.args.get('window', 12, type=int)
+    min_support = request.args.get('min_support', 0.005, type=float)
+    min_confidence = request.args.get('min_confidence', 0.5, type=float)
+
+    rec_data = get_restock_recommendations(
+        df, window=window, min_support=min_support, min_confidence=min_confidence
+    )
+
+    return render_template('rekomendasi.html',
+                           rec_data=rec_data,
+                           window=window,
+                           min_support=min_support,
+                           min_confidence=min_confidence,
+                           active_session=active,
+                           active_dataset=active_dataset,
+                           data_stats=stats)
+
+
+@app.route('/moving_average')
+def moving_average_analysis():
+    active_dataset = get_active_dataset()
+    if not active_dataset:
+        flash(
+            'Belum ada data yang siap dianalisis. '
+            'Silakan upload data e-commerce dan lakukan proses cleaning terlebih dahulu.',
+            'warning'
+        )
+        return redirect(url_for('upload_data'))
+
+    session_ids = get_dataset_session_ids(active_dataset['id'])
+    if not session_ids:
+        flash('Belum ada data cleaned dalam dataset aktif.', 'warning')
+        return redirect(url_for('upload_data'))
+
+    conn = get_db_connection()
+    placeholders, params = build_session_in_clause(session_ids)
+
+    # Ambil seluruh transaksi dari semua session dalam dataset aktif
+    df = pd.read_sql_query(
+        f'SELECT tanggal, produk, jumlah FROM cleaned_transaksi WHERE session_id IN ({placeholders})',
+        conn,
+        params=params
+    )
+
+    # Agregasi stats untuk info tampilan
+    stat_rows = conn.execute(
+        f'SELECT * FROM cleaning_stats WHERE session_id IN ({placeholders})', params
+    ).fetchall()
+    active = conn.execute(
+        "SELECT * FROM upload_session WHERE id=?", (session_ids[-1],)
+    ).fetchone()
+    conn.close()
+
+    stats = None
+    if stat_rows:
+        stats = {
+            'total_raw': sum(safe_int(r['total_raw']) for r in stat_rows),
+            'total_clean': sum(safe_int(r['total_clean']) for r in stat_rows),
+            'total_batal': sum(safe_int(r['total_batal']) for r in stat_rows),
+            'total_invalid': sum(safe_int(r['total_invalid']) for r in stat_rows),
+        }
+
+    if df.empty:
+        flash('Data cleaned masih kosong.', 'warning')
+        return redirect(url_for('cleaned_data'))
+
+    window = request.args.get('window', 12, type=int)
+    ma_data = calculate_moving_average(df, window=window)
+    
+    # Handle both old (list) and new (dict) return types defensively
+    results = ma_data['items'] if isinstance(ma_data, dict) else ma_data
+    validation = ma_data.get('validation') if isinstance(ma_data, dict) else None
+
+    return render_template('moving_average.html',
+                           results=results,
+                           validation=validation,
+                           window=window,
+                           active_session=active,
+                           active_dataset=active_dataset,
+                           data_stats=stats)
+
+
+# ─────────────────────────────────────────────
+# ROUTES — EXPORT PDF
+# ─────────────────────────────────────────────
+
+@app.route('/export_pdf')
+def export_pdf():
+    conn = get_db_connection()
+    active_dataset = get_active_dataset()
+    stats = None
+
+    if active_dataset:
+        session_ids = get_dataset_session_ids(active_dataset['id'])
+        if session_ids:
+            placeholders, params = build_session_in_clause(session_ids)
+            df = pd.read_sql_query(
+                f'SELECT id_transaksi, tanggal, produk, jumlah FROM cleaned_transaksi WHERE session_id IN ({placeholders}) ORDER BY tanggal DESC',
+                conn,
+                params=params
+            )
+            stat_rows = conn.execute(
+                f'SELECT * FROM cleaning_stats WHERE session_id IN ({placeholders})', params
+            ).fetchall()
+            if stat_rows:
+                stats = {
+                    'total_raw': sum(r['total_raw'] for r in stat_rows),
+                    'total_clean': sum(r['total_clean'] for r in stat_rows),
+                    'total_batal': sum(r['total_batal'] for r in stat_rows),
+                    'total_invalid': sum(r['total_invalid'] for r in stat_rows),
+                }
+        else:
+            df = pd.DataFrame()
+    else:
+        df = pd.read_sql_query('SELECT * FROM transaksi ORDER BY tanggal DESC', conn)
+
+    conn.close()
+
+    if df.empty:
+        flash('Data kosong, tidak bisa membuat laporan.', 'warning')
+        return redirect(url_for('index'))
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter)
+    styles = getSampleStyleSheet()
+    elements = []
+
+    elements.append(Paragraph("Laporan Analisis Stok Marema Textile", styles['Title']))
+    elements.append(Spacer(1, 12))
+
+    if stats:
+        elements.append(Paragraph("Statistik Data Cleaning", styles['Heading2']))
+        elements.append(Paragraph(f"Total Data Mentah: {stats['total_raw']:,}", styles['Normal']))
+        elements.append(Paragraph(f"Data Setelah Cleaning: {stats['total_clean']:,}", styles['Normal']))
+        elements.append(Paragraph(f"Data Dibatalkan (Status Batal): {stats['total_batal']:,}", styles['Normal']))
+        elements.append(Paragraph(f"Data Tidak Valid: {stats['total_invalid']:,}", styles['Normal']))
+        elements.append(Spacer(1, 12))
+
+    elements.append(Paragraph("Data Transaksi (Hasil Cleaning)", styles['Heading2']))
+    data = [['ID Transaksi', 'Tanggal', 'Produk', 'Jumlah']]
+    for _, row in df.head(20).iterrows():
+        data.append([row['id_transaksi'], row['tanggal'], row['produk'], str(row['jumlah'])])
+
+    t = Table(data)
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+        ('GRID', (0, 0), (-1, -1), 1, colors.black)
+    ]))
+    elements.append(t)
+    elements.append(Spacer(1, 24))
+
+    elements.append(Paragraph("Ringkasan", styles['Heading2']))
+    elements.append(Paragraph(f"Total Transaksi Valid: {len(df):,}", styles['Normal']))
+    elements.append(Paragraph(f"Total Jenis Produk: {df['produk'].nunique()}", styles['Normal']))
+
+    doc.build(elements)
+    buffer.seek(0)
+
+    from flask import make_response
+    response = make_response(buffer.getvalue())
+    response.headers['Content-Type'] = 'application/pdf'
+    response.headers['Content-Disposition'] = 'attachment; filename="laporan_marema.pdf"'
+    return response
+
+
+if __name__ == '__main__':
+    app.run(debug=True)

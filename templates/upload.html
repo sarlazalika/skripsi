@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% block title %}Upload Data - Marema Textile{% endblock %}
+{% block page_title %}Upload Data Mentah E-Commerce{% endblock %}
+{% block page_title_mobile %}Upload Data{% endblock %}
+
+{% block content %}
+<div class="page-heading">
+    <h4>Upload Data Mentah E-Commerce</h4>
+    <p>Upload langsung hasil ekspor dari platform e-commerce Anda (Tokopedia, Shopee, Lazada, dll).</p>
+</div>
+
+<div class="row justify-content-center mt-4">
+    <div class="col-lg-7 col-md-10">
+        <div class="card mb-4">
+            <div class="card-header">
+                <i class="bi bi-cloud-arrow-up me-2 text-primary"></i>Form Upload Data
+            </div>
+            <div class="card-body p-4 text-center">
+                <form method="POST" enctype="multipart/form-data" id="uploadForm">
+                    <!-- Area Upload -->
+                    <div class="p-5 mb-4 bg-light rounded-3 border" style="border-style: dashed !important;">
+                        <i class="bi bi-file-earmark-spreadsheet text-primary" style="font-size:3rem;"></i>
+                        <h6 class="mt-3 fw-bold">Pilih File CSV / Excel</h6>
+                        <p class="text-muted small mb-3">Sistem akan secara otomatis memetakan dan membersihkan data Anda.</p>
+                        
+                        <div class="mb-3 w-75 mx-auto text-start">
+                            <input class="form-control" type="file" id="file" name="file" accept=".csv,.xlsx" required>
+                        </div>
+                        <span class="badge bg-secondary">.CSV</span>
+                        <span class="badge bg-secondary">.XLSX</span>
+                    </div>
+
+                    <!-- Info Box -->
+                    <div class="alert alert-info text-start d-flex align-items-start gap-3 mb-4" style="font-size:0.85rem;">
+                        <i class="bi bi-info-circle-fill mt-1"></i>
+                        <div>
+                            <strong>Pemetaan Otomatis</strong>
+                            <p class="mb-0 mt-1">Sistem akan mendeteksi kolom seperti "No. Pesanan", "Tanggal", "Nama Produk", dan "Jumlah" secara otomatis tanpa perlu Anda ubah nama kolomnya.</p>
+                        </div>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary w-100 py-2" id="uploadBtn">
+                        <i class="bi bi-cloud-check me-2"></i>Upload dan Lanjutkan
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+document.getElementById('uploadForm').addEventListener('submit', function() {
+    const btn = document.getElementById('uploadBtn');
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Memproses...';
+    btn.disabled = true;
+});
+</script>
+{% endblock %}

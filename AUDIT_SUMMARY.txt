@@ -1,0 +1,312 @@
+================================================================================
+AUDIT MEKANISME UPLOAD DATA - RINGKASAN EKSEKUTIF
+Aplikasi Marema Textile System
+Tanggal: 2026-09-23
+================================================================================
+
+PERTANYAAN UTAMA: 
+"Ketika upload file baru, data dari upload sebelumnya tidak terlihat. 
+Apakah sistem menghapus/menimpa atau append?"
+
+JAWABAN SINGKAT: 
+Data TIDAK dihapus atau ditimpa. Data tetap tersimpan di database.
+"Tidak terlihat" karena UI hanya menampilkan sesi upload TERAKHIR.
+
+
+================================================================================
+RINGKASAN TEMUAN AUDIT
+================================================================================
+
+1. MEKANISME UPLOAD DATA
+   Status: ✅ WORKING AS DESIGNED
+   
+   Perilaku:
+   • Setiap upload file BARU membuat sesi upload baru (session_id)
+   • Sesi lama TETAP tersimpan di database
+   • Tidak ada kode yang menghapus data lama saat upload baru
+   
+   Evidence: app.py baris 270-276
+   → Menggunakan INSERT (bukan DELETE sebelumnya)
+   → cur.lastrowid mendapat ID session baru
+   
+
+2. PENYEBAB DATA LAMA "TIDAK TERLIHAT"
+   Status: 🔍 DESIGN LIMITATION (bukan bug)
+   
+   Penyebab:
+   • Fungsi get_active_session() (baris 104-110)
+   • Hanya mengambil 1 sesi TERAKHIR (ORDER BY id DESC LIMIT 1)
+   • Dashboard & Analisis hanya tampilkan data dari sesi aktif
+   • Data dari sesi lama ada di database tapi tidak ditampilkan
+   
+   Analogi:
+   → Seperti punya 3 notebook tapi hanya membuka notebook terbaru
+   → Notebook lama tidak hilang, hanya "tidak dibaca"
+
+
+3. PENGHAPUSAN DATA
+   Status: ✅ AMAN (data tidak dihapus)
+   
+   Fakta:
+   • clear_data.py TIDAK dipanggil otomatis saat upload
+   • Tidak ada kode yang DELETE upload_session lama
+   • Data hanya dihapus manual dengan clear_data.py
+   • Session >5 upload terakhir dihapus dari raw_data_temp (hemat storage)
+
+
+4. ANALISIS (APRIORI & MOVING AVERAGE)
+   Status: ⚠️ LIMITATION
+   
+   Issue:
+   • Hanya menganalisis data dari sesi AKTIF
+   • Data dari sesi lama TIDAK dianalisis
+   • Jika ingin analisis GABUNGAN data: perlu modifikasi code
+   
+
+5. STRUKTUR DATABASE YANG JELAS
+   Status: ✅ WELL DESIGNED
+   
+   Keunggulan:
+   • Setiap session memiliki session_id unik
+   • Data dari berbagai sesi terikat dengan session_id
+   • Data isolated per sesi → mudah di-track dan di-clean
+
+
+================================================================================
+BUKTI KODE SPESIFIK
+================================================================================
+
+BUKTI 1: Upload membuat session BARU (tidak delete lama)
+─────────────────────────────────────────────────────────
+File: app.py, baris 270-276
+
+   cur = conn.execute(
+       '''INSERT INTO upload_session (filename, total_rows, column_mapping, 
+          raw_preview, status)
+          VALUES (?, ?, ?, ?, ?)''',
+       (file.filename, len(df_raw), json.dumps(mapping), ...)
+   )
+   session_id = cur.lastrowid
+
+Analisis: INSERT baru → tidak delete session lama ✓
+
+
+BUKTI 2: Data tetap ada dengan session_id terikat
+──────────────────────────────────────────────────
+File: app.py, baris 407-412
+
+   # Hapus data cleaned LAMA untuk sesi ini (HANYA sesi ini)
+   conn.execute('DELETE FROM cleaned_transaksi WHERE session_id=?', 
+                (session_id,))
+   
+   # Insert data baru dengan session_id terikat
+   conn.executemany(
+       'INSERT INTO cleaned_transaksi (...) VALUES (?, ?, ?, ?, ?)',
+       rows_clean  # session_id dari sesi BARU
+   )
+
+Analisis: DELETE WHERE session_id=? → hanya hapus data sesi YANG SAMA
+          Data dari session_id lain TETAP ADA ✓
+
+
+BUKTI 3: UI hanya tampilkan sesi TERAKHIR
+──────────────────────────────────────────
+File: app.py, baris 104-110
+
+   def get_active_session():
+       row = conn.execute(
+           "SELECT * FROM upload_session 
+            WHERE status='cleaned' 
+            ORDER BY id DESC 
+            LIMIT 1"  ← AMBIL HANYA 1 TERBARU
+       ).fetchone()
+
+Analisis: ORDER BY id DESC LIMIT 1 → ambil sesi terbaru saja
+         Sesi lama "tidak terlihat" tapi ada di database ✓
+
+
+BUKTI 4: Analisis menggunakan WHERE session_id
+──────────────────────────────────────────────
+File: app.py, baris 520-523
+
+   df = pd.read_sql_query(
+       'SELECT ... FROM cleaned_transaksi 
+        WHERE session_id=?',
+       params=(active['id'],)  ← HANYA sesi aktif
+   )
+
+Analisis: WHERE session_id=? → hanya analisis data sesi aktif
+         Data dari session_id lain TIDAK dianalisis ✓
+
+
+BUKTI 5: clear_data.py tidak dipanggil otomatis
+───────────────────────────────────────────────
+Pencarian di app.py:
+• "clear_data" → ❌ TIDAK DITEMUKAN
+• "import clear_data" → ❌ TIDAK DITEMUKAN
+• "subprocess.run" / "os.system" → ❌ TIDAK DITEMUKAN
+
+Analisis: clear_data.py hanya bisa dijalankan manual ✓
+
+
+================================================================================
+SKENARIO KONKRET: APA YANG TERJADI
+================================================================================
+
+Timeline Upload 2 File Secara Bertahap:
+
+[SEBELUM]
+Database: Kosong
+
+[STEP 1: Upload file1.csv (100 transaksi)]
+→ Database:
+  • upload_session: id=1, status='pending'
+  • raw_data_temp: 100 baris dengan session_id=1
+  • cleaned_transaksi: kosong
+
+[STEP 2: Clean file1]
+→ Database:
+  • upload_session: id=1, status='cleaned' ✓
+  • cleaned_transaksi: 100 baris, session_id=1 ✓
+  • total: 100 baris
+
+[STEP 3: Upload file2.csv (150 transaksi)]
+→ Database:
+  • upload_session: id=1 (status='cleaned'), id=2 (status='pending') ✓
+  • cleaned_transaksi: 100 baris (session_id=1) + kosong (belum clean session 2)
+  • total: 100 baris (TIDAK BERUBAH)
+
+[STEP 4: Clean file2]
+→ Database:
+  • upload_session: id=1 (status='cleaned'), id=2 (status='cleaned') ✓
+  • cleaned_transaksi: 100 baris (session_id=1) + 150 baris (session_id=2) ✓
+  • total: 250 baris (BERTAMBAH)
+
+[TAPI UI DASHBOARD HANYA MENAMPILKAN]
+→ Data dari session_id=2 (terbaru)
+→ 150 baris
+→ Data dari session_id=1 "tidak terlihat"!
+
+[REALITAS DATABASE]
+→ Data session_id=1 MASIH ADA 100 baris
+→ Data session_id=2 ADA 150 baris
+→ Total tetap: 250 baris
+
+
+================================================================================
+REKOMENDASI UNTUK SKRIPSI ANDA
+================================================================================
+
+PILIHAN 1: SATU FILE UNTUK SELURUH DATA ✅ STRONGLY RECOMMENDED
+══════════════════════════════════════════════════════════════
+
+ALASAN:
+• Data research selalu dalam 1 period tertentu (misal: Jan-Jun 2026)
+• Lebih sederhana dan konsisten
+• Menghindari confusion tentang "data hilang"
+• Sesuai dengan standar penelitian: 1 period = 1 analysis
+
+IMPLEMENTASI:
+1. Kumpulkan SEMUA transaksi dalam periode penelitian
+2. Buat 1 file CSV dengan struktur:
+   | Order ID | Date | Product | Qty | Status |
+3. Upload file SATU KALI
+4. Clean → Analisis → Export laporan
+
+WAKTU PERSIAPAN: ~30 menit
+
+
+PILIHAN 2: MULTIPLE FILES DENGAN APPEND ⚠️ TIDAK DISARANKAN (PERLU MODIFIKASI)
+═══════════════════════════════════════════════════════════════════════════════
+
+KENAPA TIDAK DISARANKAN:
+• UI hanya tampilkan sesi terakhir → data awal "hilang" dari view
+• Analisis hanya untuk sesi terakhir → tidak gabungan
+• Perlu modifikasi code untuk:
+  - Merge multiple sessions di analisis
+  - Update UI untuk tampil semua session
+  - Dokumentasi jadi lebih kompleks
+
+JIKA TETAP DIPILIH:
+• Perlu modifikasi route /apriori, /moving_average, /cleaned_data
+• Update query untuk SELECT tanpa WHERE session_id
+• Tambah UI untuk select period/session
+• Dokumentasi penelitian jadi kompleks
+
+WAKTU PERSIAPAN: ~2-3 jam modifikasi code + testing
+
+
+================================================================================
+REKOMENDASI FINAL UNTUK SKRIPSI
+================================================================================
+
+IMPLEMENTASI DIREKOMENDASIKAN:
+
+Fase 1: Persiapan Data (1-2 hari)
+─────────────────────────────────
+□ Kumpulkan data transaksi Marema Textile untuk periode penelitian
+□ Buat 1 file CSV dengan format:
+  - Order ID, Tanggal, Nama Produk, Jumlah, Status
+  - Semua transaksi valid dalam periode
+□ Verifikasi data di spreadsheet (tidak ada baris kosong, format konsisten)
+
+Fase 2: Upload & Processing (1 jam)
+──────────────────────────────────
+□ Upload file SATU KALI
+□ Review preview data (validasi mapping kolom)
+□ Jalankan cleaning
+□ Verifikasi data cleaned sudah benar
+
+Fase 3: Analisis (2-3 jam)
+─────────────────────────
+□ Jalankan Apriori analysis
+  - Tentukan min_support & min_confidence sesuai research
+  - Catat frequent itemsets dan rules
+□ Jalankan Moving Average analysis
+  - Tentukan window size (3, 4, atau 5)
+  - Catat trend prediksi penjualan
+□ Export PDF laporan
+
+Fase 4: Dokumentasi (1-2 jam)
+─────────────────────────────
+□ Catat metadata penelitian:
+  - Tanggal upload: [tanggal]
+  - File source: [nama file]
+  - Period: [Jan-Jun 2026 atau sesuai]
+  - Total data: [jumlah transaksi]
+  - Data valid setelah cleaning: [jumlah]
+  - Session ID: [ID di database]
+  
+□ Simpan:
+  - File CSV original
+  - Screenshot cleaning stats
+  - PDF laporan dari aplikasi
+  - Screenshot analisis hasil
+
+TOTAL WAKTU: 4-5 hari (tergantung ketersediaan data)
+
+
+================================================================================
+KESIMPULAN
+================================================================================
+
+STATUS AUDIT: ✅ COMPLETED - PROBLEM IDENTIFIED & EXPLAINED
+
+TEMUAN UTAMA:
+→ Data TIDAK hilang ketika upload file baru
+→ Data TETAP tersimpan di database dengan session_id berbeda
+→ "Tidak terlihat" karena UI design hanya tampilkan sesi terbaru
+→ BUKAN bug, ini adalah design choice yang logis
+
+REKOMENDASI:
+→ Gunakan SATU FILE untuk semua data penelitian
+→ Lebih sederhana, lebih konsisten, sesuai standar penelitian
+→ Jika tetap multiple files: perlu modifikasi code
+
+STATUS SIAP:
+✅ Audit selesai
+✅ Tidak ada perubahan kode/database dilakukan
+✅ Menunggu instruksi lanjutan dari pengguna
+
+
+================================================================================

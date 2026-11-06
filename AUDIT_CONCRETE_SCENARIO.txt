@@ -1,0 +1,336 @@
+================================================================================
+SIMULASI KONKRET: APA YANG TERJADI SAAT UPLOAD BERTAHAP
+================================================================================
+
+SKENARIO:
+Pengguna upload 2 file transaksi secara bertahap untuk skripsi penelitian.
+
+File 1: jan-feb-2026.csv (100 transaksi)
+File 2: mar-apr-2026.csv (150 transaksi)
+
+================================================================================
+STEP 1: UPLOAD FILE PERTAMA (jan-feb-2026.csv)
+================================================================================
+
+AKSI: Pengguna pilih file dan upload
+
+DATABASE SEBELUM:
+┌─────────────────────────────────────────────────────────────────┐
+│ upload_session                                                  │
+│ id | filename        | status  | total_rows                    │
+├─────────────────────────────────────────────────────────────────┤
+│ (kosong)                                                        │
+└─────────────────────────────────────────────────────────────────┘
+
+DATABASE SESUDAH:
+┌─────────────────────────────────────────────────────────────────┐
+│ upload_session                                                  │
+│ id | filename            | status  | total_rows                │
+├─────────────────────────────────────────────────────────────────┤
+│ 1  | jan-feb-2026.csv    | pending │ 100                       │
+└─────────────────────────────────────────────────────────────────┘
+
+DATA CONDITION:
+✓ raw_data_temp: 100 baris (dari file 1) dengan session_id=1
+✓ cleaned_transaksi: kosong (belum di-clean)
+
+
+================================================================================
+STEP 2: PREVIEW & CLEANING FILE PERTAMA
+================================================================================
+
+AKSI: Pengguna klik "Preview" → "Process Clean"
+
+DATABASE SESUDAH CLEANING:
+┌──────────────────────────────────────────────────────────────┐
+│ upload_session                                               │
+│ id | filename          | status  | total_rows               │
+├──────────────────────────────────────────────────────────────┤
+│ 1  | jan-feb-2026.csv  | cleaned │ 100                      │
+└──────────────────────────────────────────────────────────────┘
+
+┌───────────────────────────────────────────────────────────┐
+│ cleaned_transaksi                                         │
+│ id  | session_id | id_transaksi | tanggal    | produk ...│
+├───────────────────────────────────────────────────────────┤
+│ 1   | 1          | TR-001       | 2026-01-01 | Kain  ...│
+│ 2   | 1          | TR-002       | 2026-01-02 | Gorden...│
+│ 3   | 1          | TR-003       | 2026-01-03 | Batang...│
+│ ... | 1          | ...          | ...        | ...   ...│
+│ 95  | 1          | TR-095       | 2026-02-28 | Tikar ...│
+│ (100 total data dari file 1)                             │
+└───────────────────────────────────────────────────────────┘
+
+DATA CONDITION:
+✓ upload_session: 1 sesi dengan status='cleaned'
+✓ cleaned_transaksi: 100 baris dari file 1, semua dengan session_id=1
+
+
+================================================================================
+STEP 3: PENGGUNA UPLOAD FILE KEDUA (mar-apr-2026.csv)
+================================================================================
+
+AKSI: Pengguna upload file baru
+
+DATABASE SEBELUM:
+┌──────────────────────────────────────────────────────────────┐
+│ upload_session                                               │
+│ id | filename          | status  | total_rows               │
+├──────────────────────────────────────────────────────────────┤
+│ 1  | jan-feb-2026.csv  | cleaned │ 100                      │
+└──────────────────────────────────────────────────────────────┘
+
+DATABASE SESUDAH (KODE ROUTE /UPLOAD):
+┌──────────────────────────────────────────────────────────────┐
+│ upload_session                                               │
+│ id | filename            | status  | total_rows             │
+├──────────────────────────────────────────────────────────────┤
+│ 1  | jan-feb-2026.csv    | cleaned │ 100                    │
+│ 2  | mar-apr-2026.csv    | pending │ 150   ← BARU!         │
+└──────────────────────────────────────────────────────────────┘
+
+KUNCI POIN:
+✓ Sesi 1 MASIH ADA dengan status='cleaned'
+✓ Sesi 2 BARU dibuat dengan status='pending'
+❌ Sesi 1 TIDAK dihapus
+❌ Data cleaned dari sesi 1 TIDAK dihapus
+
+DATA CONDITION:
+✓ upload_session: 2 sesi
+✓ cleaned_transaksi: masih 100 baris dari sesi 1 (TIDAK BERUBAH)
+✓ raw_data_temp: 100 baris sesi 1 + 150 baris sesi 2
+
+
+================================================================================
+STEP 4: PENGGUNA PREVIEW & CLEAN FILE KEDUA
+================================================================================
+
+AKSI: Pengguna klik "Preview" → "Process Clean"
+
+DATABASE SESUDAH:
+┌──────────────────────────────────────────────────────────────┐
+│ upload_session                                               │
+│ id | filename            | status  | total_rows             │
+├──────────────────────────────────────────────────────────────┤
+│ 1  | jan-feb-2026.csv    | cleaned │ 100                    │
+│ 2  | mar-apr-2026.csv    | cleaned │ 150   ← STATUS CHANGED│
+└──────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────┐
+│ cleaned_transaksi                                          │
+│ id  | session_id | id_transaksi | tanggal   | produk      │
+├────────────────────────────────────────────────────────────┤
+│ 1   | 1          | TR-001       | 2026-01-01│ Kain        │
+│ ... | 1          | ...          | ...       | ...         │
+│ 100 | 1          | TR-095       | 2026-02-28│ Tikar       │
+│ ────────────────────────────────────────────────────────── │
+│ 101 | 2          | TR-096       | 2026-03-01│ Kain        │ ← BARU
+│ 102 | 2          | TR-097       | 2026-03-02│ Gorden      │   dari
+│ 103 | 2          | TR-098       | 2026-03-03│ Batang      │   file 2
+│ ... | 2          | ...          | ...       | ...         │
+│ 250 | 2          | TR-245       | 2026-04-30│ Tikar       │
+└────────────────────────────────────────────────────────────┘
+
+TOTAL: 250 baris di cleaned_transaksi
+       - 100 dari sesi 1 (session_id=1)
+       - 150 dari sesi 2 (session_id=2)
+
+DATA CONDITION:
+✓ cleaned_transaksi: 250 baris total
+  - Baris 1-100: session_id=1 (file 1)
+  - Baris 101-250: session_id=2 (file 2)
+✓ Data dari file 1 MASIH ADA
+
+
+================================================================================
+STEP 5: PENGGUNA BUKA UI - MELIHAT DASHBOARD
+================================================================================
+
+AKSI: Pengguna buka halaman index (dashboard)
+
+KODE YANG DIJALANKAN (app.py, baris 104-110):
+
+    def get_active_session():
+        row = conn.execute(
+            "SELECT * FROM upload_session 
+             WHERE status='cleaned' 
+             ORDER BY id DESC 
+             LIMIT 1"  ← AMBIL HANYA 1, TERBARU
+        ).fetchone()
+        return row
+
+HASIL:
+active = {
+    'id': 2,              ← SESI TERBARU
+    'filename': 'mar-apr-2026.csv',
+    'status': 'cleaned',
+    'total_rows': 150
+}
+
+KODE DI DASHBOARD (app.py, baris 128-132):
+
+    total_clean = conn.execute(
+        'SELECT COUNT(*) FROM cleaned_transaksi 
+         WHERE session_id=?',
+        (active['id'],)  ← HANYA session_id=2
+    ).fetchone()[0]
+
+HASIL QUERY:
+SELECT COUNT(*) FROM cleaned_transaksi 
+WHERE session_id=2
+→ RETURN: 150
+
+APA YANG DITAMPILKAN DI UI:
+┌─────────────────────────────────────┐
+│ DASHBOARD                           │
+├─────────────────────────────────────┤
+│ Total Transaksi: 150                │ ← HANYA dari file 2
+│ Total Produk: 8                     │
+│ File: mar-apr-2026.csv              │
+│                                     │
+│ ⚠ DATA DARI FILE 1 TIDAK TERLIHAT   │
+│   (tapi MASIH ADA di database!)     │
+└─────────────────────────────────────┘
+
+KESALAHPAHAMAN PENGGUNA:
+❌ "Data dari file 1 hilang!"
+✓ REALITAS: "Data dari file 1 masih ada di database tapi tidak ditampilkan"
+
+
+================================================================================
+STEP 6: PENGGUNA JALANKAN ANALISIS
+================================================================================
+
+AKSI: Pengguna klik "Apriori Analysis"
+
+KODE (app.py, baris 512-525):
+
+    active = get_active_session()  ← AMBIL session 2 (terbaru)
+    
+    df = pd.read_sql_query(
+        'SELECT id_transaksi, produk, jumlah 
+         FROM cleaned_transaksi 
+         WHERE session_id=?',
+        conn,
+        params=(active['id'],)  ← HANYA session_id=2
+    )
+
+HASIL QUERY:
+150 baris dari file 2 (mar-apr-2026.csv)
+
+APA YANG DIANALISIS:
+✓ Apriori analysis pada data file 2 (150 transaksi)
+❌ Data file 1 TIDAK dianalisis
+
+HASIL ANALISIS:
+"Top Frequent Itemsets berdasarkan file 2 saja"
+
+MASALAH:
+→ Jika penelitian memerlukan analisis GABUNGAN file 1 + file 2:
+  TIDAK BISA dengan desain saat ini
+
+
+================================================================================
+KESIMPULAN: DATA TETAP ADA, TAPI TIDAK DITAMPILKAN
+================================================================================
+
+FAKTA SETELAH AUDIT:
+┌─────────────────────────────────────────────────────────────┐
+│ Database Content (cleaned_transaksi)                        │
+├─────────────────────────────────────────────────────────────┤
+│ Session 1 (jan-feb): 100 baris ✓ MASIH ADA               │
+│ Session 2 (mar-apr): 150 baris ✓ MASIH ADA               │
+│ TOTAL: 250 baris TERSIMPAN                                 │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│ UI Display (Dashboard & Analisis)                           │
+├─────────────────────────────────────────────────────────────┤
+│ Hanya menampilkan: Session 2 (150 baris) ✗ TIDAK LENGKAP   │
+│ Tidak ditampilkan: Session 1 (100 baris) ✗ "HILANG"        │
+│ TOTAL TERLIHAT: 150 baris                                  │
+└─────────────────────────────────────────────────────────────┘
+
+ANALOGI:
+→ Uang Anda di bank: Rp 250.000 (Rp 100rb + Rp 150rb)
+→ Laporan online hanya menampilkan: Rp 150.000 (transaksi terakhir)
+→ Uang tidak hilang, hanya laporan yang tidak menampilkan semua
+
+
+================================================================================
+REKOMENDASI UNTUK SKRIPSI ANDA
+================================================================================
+
+OPSI 1: SATU FILE - RECOMMENDED ✅
+────────────────────────────────────
+
+SOLUSI:
+1. Siapkan 1 file yang berisi SEMUA data Jan-Apr 2026
+2. Upload SATU KALI
+3. Analisis dari file tersebut
+
+KEUNTUNGAN:
+✓ Semua data dalam 1 session
+✓ Analisis Apriori & Moving Average mencakup data LENGKAP
+✓ Laporan konsisten dan mudah di-trace
+✓ Tidak ada confusion tentang "data hilang"
+✓ Sesuai untuk penelitian: 1 period = 1 file
+
+
+OPSI 2: MULTIPLE FILES - PERLU MODIFIKASI CODE ⚠️
+────────────────────────────────────────────────────
+
+JIKA HARUS multiple files:
+1. Perlu modifikasi code untuk MERGE data dari multiple sessions
+2. Update fungsi get_active_session() untuk:
+   - Ambil semua session dengan status='cleaned'
+   - Gabungkan data dari semua session
+   - Jalankan analisis pada data gabungan
+
+3. Update dashboard untuk:
+   - Tampilkan data dari SEMUA session
+   - Catat metadata setiap session
+
+Ini memerlukan perubahan kode yang cukup signifikan.
+
+
+================================================================================
+REKOMENDASI IMPLEMENTASI (OPSI 1 - DISARANKAN)
+================================================================================
+
+PERSIAPAN DATA:
+1. Ambil semua transaksi Jan-Feb dari source data → file1_clean.csv
+2. Ambil semua transaksi Mar-Apr dari source data → file2_clean.csv
+3. Gabungkan: jan-apr-2026.csv (SATU file, 250 transaksi)
+
+STRUKTUR FILE:
+┌─────────────────────────────────────────────────┐
+│ jan-apr-2026.csv                                │
+├─────────────────────────────────────────────────┤
+│ Order ID | Date       | Product    | Qty | Status│
+│ TR-001   | 2026-01-01 | Kain Katun | 5   | Selesai
+│ TR-002   | 2026-01-02 | Gorden     | 3   | Selesai
+│ ...      | ...        | ...        | ...   | ...
+│ TR-096   | 2026-03-01 | Kain Katun | 8   | Selesai
+│ ...      | ...        | ...        | ...   | ...
+│ TR-245   | 2026-04-30 | Tikar      | 2   | Selesai
+└─────────────────────────────────────────────────┘
+
+PROSES:
+1. Upload file SATU KALI
+2. Review preview & mapping
+3. Process cleaning → data 250 baris di-clean
+4. Jalankan analisis:
+   - Apriori: pola pembelian selama Jan-Apr
+   - Moving Average: trend penjualan per minggu
+5. Export PDF laporan
+
+DOKUMENTASI:
+- Tanggal upload: 2026-09-23
+- File source: jan-apr-2026.csv
+- Total data: 250 baris
+- Session ID: 3 (atau ID terakhir)
+- Analisis periode: Januari - April 2026
+
+
+================================================================================

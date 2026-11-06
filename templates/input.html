@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+
+{% block title %}Input Transaksi - Marema Textile{% endblock %}
+{% block page_title %}Input Transaksi Manual{% endblock %}
+{% block page_title_mobile %}Input Manual{% endblock %}
+
+{% block content %}
+<div class="page-heading">
+    <h4>Tambah Transaksi Baru</h4>
+    <p>Masukkan riwayat penjualan secara manual ke sistem.</p>
+</div>
+
+<div class="row justify-content-center mt-4">
+    <div class="col-lg-6 col-md-8">
+        <div class="card">
+            <div class="card-header">
+                <i class="bi bi-pencil-square text-primary me-2"></i>Form Input Transaksi
+            </div>
+            <div class="card-body p-4">
+                <form method="POST">
+                    <div class="mb-3">
+                        <label for="id_transaksi" class="form-label">ID Transaksi</label>
+                        <input type="text" class="form-control" id="id_transaksi" name="id_transaksi" required placeholder="TRX-001">
+                        <div class="form-text">Kode unik referensi pesanan.</div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="tanggal" class="form-label">Tanggal Transaksi</label>
+                        <input type="date" class="form-control" id="tanggal" name="tanggal" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="produk" class="form-label">Nama Produk</label>
+                        <input type="text" class="form-control" id="produk" name="produk" required placeholder="Misal: Kain Sutra Batik">
+                    </div>
+                    <div class="mb-4">
+                        <label for="jumlah" class="form-label">Jumlah (Qty)</label>
+                        <input type="number" class="form-control" id="jumlah" name="jumlah" required min="1" placeholder="10">
+                    </div>
+                    
+                    <hr class="my-4">
+                    
+                    <div class="d-flex justify-content-end gap-2">
+                        <a href="/data" class="btn btn-outline-secondary">Batal</a>
+                        <button type="submit" class="btn btn-primary">
+                            <i class="bi bi-save me-2"></i>Simpan Transaksi
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

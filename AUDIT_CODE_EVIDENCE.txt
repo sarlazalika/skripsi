@@ -1,0 +1,306 @@
+================================================================================
+AUDIT DETAIL: EVIDENCE KODE SPESIFIK
+================================================================================
+
+MASALAH: "Ketika upload file baru, data dari upload sebelumnya tidak terlihat"
+
+INVESTIGASI: Apakah sistem menghapus/menimpa/append data?
+
+================================================================================
+EVIDENCE #1: ROUTE /UPLOAD MEMBUAT SESSION BARU (TIDAK MENGHAPUS LAMA)
+================================================================================
+
+File: app.py, baris 223-298
+Fungsi: upload_data()
+
+KODE YANG RELEVAN (baris 270-276):
+
+    # Simpan ke session upload_session
+    conn = get_db_connection()
+    cur = conn.execute(
+        '''INSERT INTO upload_session (filename, total_rows, column_mapping, raw_preview, status)
+           VALUES (?, ?, ?, ?, ?)''',
+        (
+            file.filename,
+            len(df_raw),
+            json.dumps(mapping),
+            df_raw.head(50).fillna('').to_json(orient='records', force_ascii=False),
+            'pending'
+        )
+    )
+    session_id = cur.lastrowid
+
+ANALISIS:
+✓ Menggunakan INSERT (bukan DELETE/UPDATE)
+✓ Setiap upload membuat record BARU
+✓ session_id = cur.lastrowid (ID dari record baru)
+✓ Tidak ada kode yang menghapus upload_session lama sebelumnya
+
+KESIMPULAN:
+→ Upload file baru TIDAK menghapus upload_session lama
+→ Data lama TETAP tersimpan dengan session_id lama
+
+
+================================================================================
+EVIDENCE #2: DATA RAW DISIMPAN DENGAN SESSION_ID TERIKAT
+================================================================================
+
+File: app.py, baris 277-295
+
+KODE YANG RELEVAN:
+
+    # Simpan juga seluruh data raw
+    conn.execute(
+        '''CREATE TABLE IF NOT EXISTS raw_data_temp (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER,
+            row_index INTEGER,
+            row_data TEXT
+        )'''
+    )
+    
+    # Hapus data temp sesi lama (>5 sesi) untuk hemat storage
+    conn.execute(
+        '''DELETE FROM raw_data_temp WHERE session_id NOT IN (
+            SELECT id FROM upload_session ORDER BY id DESC LIMIT 5
+        )'''
+    )
+    
+    # Simpan data baris per baris
+    rows_to_insert = [
+        (session_id, idx, json.dumps(row, ensure_ascii=False, default=str))
+        for idx, row in enumerate(df_raw.fillna('').to_dict('records'))
+    ]
+    conn.executemany(
+        'INSERT INTO raw_data_temp (session_id, row_index, row_data) VALUES (?, ?, ?)',
+        rows_to_insert
+    )
+
+ANALISIS:
+✓ Setiap data raw di-insert dengan session_id SPESIFIK
+✓ Hanya data raw >5 sesi terakhir yang dihapus (untuk hemat storage)
+✓ Data raw dari session lama tetap ada (jika ≤5 sesi terakhir)
+
+KESIMPULAN:
+→ Data raw dari upload SEBELUMNYA tetap ada
+
+
+================================================================================
+EVIDENCE #3: ROUTE /PROCESS_CLEAN - MEMBUAT DATA CLEANED BARU (APPEND)
+================================================================================
+
+File: app.py, baris 354-430
+Fungsi: process_clean()
+
+KODE YANG RELEVAN (baris 407-427):
+
+    # Hapus data cleaned LAMA untuk sesi ini (jika ada)
+    conn.execute('DELETE FROM cleaned_transaksi WHERE session_id=?', (session_id,))
+    conn.execute('DELETE FROM cleaning_stats WHERE session_id=?', (session_id,))
+
+    # Simpan data bersih
+    rows_clean = [
+        (session_id, row['id_transaksi'], row['tanggal'], row['produk'], int(row['jumlah']))
+        for _, row in df_clean.iterrows()
+    ]
+    conn.executemany(
+        '''INSERT INTO cleaned_transaksi (session_id, id_transaksi, tanggal, produk, jumlah)
+           VALUES (?, ?, ?, ?, ?)''',
+        rows_clean
+    )
+
+    # Simpan statistik
+    conn.execute(
+        '''INSERT INTO cleaning_stats
+           (session_id, total_raw, total_clean, total_batal, total_invalid,
+            cleaning_reasons, has_status_col, pct_valid)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+        (session_id, stats['total_raw'], stats['total_clean'], ...)
+    )
+
+ANALISIS:
+✓ DELETE FROM cleaned_transaksi WHERE session_id=? 
+  → Hanya menghapus data UNTUK SESSION INI (bukan semua session)
+  → Ini untuk handle skenario "re-clean" sesi yang sama
+
+✓ INSERT INTO cleaned_transaksi ... (session_id, ...)
+  → Data baru di-insert dengan session_id TERIKAT
+  → Data dari session_id lain tetap ada
+
+KESIMPULAN:
+→ Data cleaned dari session lain TIDAK dihapus
+→ Hanya data cleaned dari sesi YANG SAMA yang bisa dihapus saat re-clean
+
+
+================================================================================
+EVIDENCE #4: UI HANYA MENAMPILKAN SESSION TERAKHIR
+================================================================================
+
+File: app.py, baris 104-110
+Fungsi: get_active_session()
+
+KODE:
+
+    def get_active_session():
+        """Kembalikan sesi upload terakhir yang sudah selesai (status='cleaned')."""
+        conn = get_db_connection()
+        row = conn.execute(
+            "SELECT * FROM upload_session WHERE status='cleaned' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        return row
+
+ANALISIS:
+✓ ORDER BY id DESC = ambil sesi dengan id TERTINGGI (terbaru)
+✓ LIMIT 1 = ambil hanya 1 sesi
+✓ WHERE status='cleaned' = hanya sesi yang sudah selesai cleaning
+
+DAMPAK:
+→ Sesi upload lama (id < terbaru) TIDAK ditampilkan di UI
+→ Tapi data tetap ADA di database
+
+
+================================================================================
+EVIDENCE #5: DASHBOARD HANYA MENAMPILKAN DATA DARI ACTIVE SESSION
+================================================================================
+
+File: app.py, baris 116-145
+Fungsi: index() - Dashboard
+
+KODE YANG RELEVAN (baris 128-132, 140-145):
+
+    # Statistik dari data cleaned (sumber utama analisis)
+    active = get_active_session()
+    total_clean = 0
+    total_produk_clean = 0
+    labels = []
+    values = []
+
+    if active:
+        total_clean = conn.execute(
+            'SELECT COUNT(*) FROM cleaned_transaksi WHERE session_id=?', 
+            (active['id'],)  # ← HANYA session_id dari sesi AKTIF
+        ).fetchone()[0]
+
+        # ... lebih banyak query dengan WHERE session_id=?
+
+ANALISIS:
+✓ Semua query menggunakan WHERE session_id=?
+✓ session_id adalah ID dari active session (sesi terbaru)
+✓ Data dari session_id lain TIDAK diambil
+
+KESIMPULAN:
+→ Dashboard hanya menampilkan data dari sesi TERAKHIR
+→ Data dari sesi lama "tidak terlihat" - INI PENYEBABNYA
+
+
+================================================================================
+EVIDENCE #6: ANALISIS (APRIORI & MOVING AVERAGE) HANYA DARI SESSION AKTIF
+================================================================================
+
+File: app.py, baris 512-561
+Fungsi: apriori_analysis()
+
+KODE:
+
+    active = get_active_session()
+    if not active:
+        flash(...)
+        return redirect(url_for('upload_data'))
+
+    # Ambil data hanya dari session aktif
+    df = pd.read_sql_query(
+        'SELECT id_transaksi, produk, jumlah FROM cleaned_transaksi WHERE session_id=?',
+        conn,
+        params=(active['id'],)  # ← HANYA dari sesi AKTIF
+    )
+
+ANALISIS:
+✓ Apriori analysis HANYA menggunakan data dari session_id aktif
+✓ Data dari session_id lain TIDAK dianalisis
+
+File: app.py, baris 564-595
+Fungsi: moving_average_analysis()
+
+KODE:
+
+    df = pd.read_sql_query(
+        'SELECT tanggal, produk, jumlah FROM cleaned_transaksi WHERE session_id=?',
+        conn,
+        params=(active['id'],)  # ← HANYA dari sesi AKTIF
+    )
+
+KESIMPULAN:
+→ Semua analisis HANYA menggunakan data dari sesi AKTIF
+→ Data dari sesi lama TIDAK dianalisis (tapi tetap ada di database)
+
+
+================================================================================
+EVIDENCE #7: TIDAK ADA KODE YANG MENGHAPUS DATA SAAT UPLOAD BARU
+================================================================================
+
+Pencarian "DELETE FROM" di seluruh file app.py:
+
+Hasil:
+1. Baris 281-286: DELETE FROM raw_data_temp (hanya >5 sesi lalu)
+2. Baris 407-408: DELETE FROM cleaned_transaksi WHERE session_id=? (hanya sesi yang sedang di-clean)
+
+TIDAK DITEMUKAN:
+❌ DELETE FROM upload_session (ketika upload baru)
+❌ DELETE FROM cleaned_transaksi (tanpa WHERE session_id)
+❌ DELETE FROM ... ketika route /upload dijalankan
+
+KESIMPULAN:
+→ Tidak ada kode yang menghapus data upload lama saat upload file baru
+
+
+================================================================================
+EVIDENCE #8: CLEAR_DATA.PY TIDAK DIPANGGIL OTOMATIS
+================================================================================
+
+Pencarian di app.py:
+- "clear_data" → ❌ TIDAK DITEMUKAN
+- "import clear_data" → ❌ TIDAK DITEMUKAN
+- "from clear_data" → ❌ TIDAK DITEMUKAN
+- "subprocess" / "system" / "os.system" → ❌ TIDAK DITEMUKAN (untuk run script)
+
+KESIMPULAN:
+→ clear_data.py hanya dapat dijalankan MANUAL
+→ TIDAK pernah dipanggil otomatis saat upload
+
+
+================================================================================
+KESIMPULAN EVIDENCE
+================================================================================
+
+PERTANYAAN: Ketika upload file BARU, apakah data lama dihapus?
+
+JAWAB: ❌ TIDAK
+
+BUKTI:
+1. Route /upload hanya INSERT session baru (baris 270-276)
+2. Tidak ada DELETE upload_session_old sebelum INSERT baru
+3. Data raw disimpan dengan session_id terikat (baris 277-295)
+4. Route /process_clean hanya hapus data cleaned UNTUK SESSION TERSEBUT (baris 407-408)
+5. Data dari session_id lain TIDAK dihapus
+6. Fungsi get_active_session() HANYA ambil session TERAKHIR (baris 104-110)
+7. UI dan analisis HANYA tampilkan data dari session aktif (baris 128-132, 512-561, 564-595)
+8. clear_data.py TIDAK dipanggil otomatis (hanya manual)
+
+
+PENYEBAB "DATA LAMA TIDAK TERLIHAT":
+→ Data tetap ada di database dengan session_id lama
+→ TAPI UI hanya menampilkan data dari session_id TERBARU
+→ Ini adalah design choice, bukan bug
+
+
+ANALOGI:
+→ Seperti punya 3 notebook:
+   • Notebook 1 (session_id=1): data transaksi Jan-Feb
+   • Notebook 2 (session_id=2): data transaksi Mar-Apr
+   • Notebook 3 (session_id=3): data transaksi May-Jun
+→ Saat ini hanya membaca Notebook 3 (terbaru)
+→ Notebook 1 & 2 masih ada, tapi "tidak terlihat" karena tidak dibuka
+
+
+================================================================================

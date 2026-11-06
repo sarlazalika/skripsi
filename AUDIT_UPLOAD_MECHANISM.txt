@@ -1,0 +1,452 @@
+================================================================================
+AUDIT MEKANISME UPLOAD DATA - APLIKASI MAREMA TEXTILE
+Tanggal: 2026-09-23
+================================================================================
+
+RINGKASAN EKSEKUTIF
+================================================================================
+Ketika upload file BARU, sistem:
+❌ TIDAK menghapus data dari upload sebelumnya
+❌ TIDAK menimpa data lama
+✅ MEMBUAT sesi upload BARU yang terpisah
+✅ Data lama TETAP tersimpan di database
+
+PENYEBAB "DATA LAMA TIDAK TERLIHAT":
+-> UI hanya menampilkan data dari sesi upload TERAKHIR yang sudah di-clean
+-> Data lama masih ada di database, tapi tidak ditampilkan di layar
+
+
+================================================================================
+1. ALUR PIPELINE UPLOAD DATA
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         TAHAP 1: UPLOAD FILE                               │
+│ Route: POST /upload                                                        │
+│ File: app.py, baris 223-298                                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Kode Kunci:
+   # INSERT sesi upload BARU (bukan DELETE dulu!)
+   cur = conn.execute(
+       '''INSERT INTO upload_session (filename, total_rows, column_mapping, 
+          raw_preview, status) VALUES (?, ?, ?, ?, ?)''',
+       (file.filename, len(df_raw), json.dumps(mapping), 
+        df_raw.head(50).fillna('').to_json(...), 'pending')
+   )
+   session_id = cur.lastrowid  # <-- ID sesi BARU dibuat
+
+PERILAKU:
+✅ Setiap upload file BARU membuat sesi upload baru di tabel upload_session
+✅ Sesi sebelumnya TIDAK dihapus (masih tersimpan)
+✅ Data raw disimpan di tabel raw_data_temp dengan session_id terikat
+✅ Hanya ada pembersihan otomatis untuk data temp >5 sesi lama:
+   
+   # Hapus data temp sesi lama (>5 sesi) untuk hemat storage
+   conn.execute('''DELETE FROM raw_data_temp WHERE session_id NOT IN (
+       SELECT id FROM upload_session ORDER BY id DESC LIMIT 5
+   )''')
+
+KESIMPULAN TAHAP 1:
+→ Data upload lama TIDAK dihapus
+→ Hanya data raw temp yang dihapus untuk sesi >5 upload terakhir
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      TAHAP 2: PREVIEW DATA                                 │
+│ Route: GET /preview                                                        │
+│ File: app.py, baris 300-352                                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+PERILAKU:
+✅ Menampilkan preview data dari session_id TERKINI (dari Flask session)
+✅ Tidak ada penghapusan data
+✅ Pengguna dapat melihat mapping kolom dan memilih kolom yang tepat
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      TAHAP 3: CLEANING DATA                                │
+│ Route: POST /process_clean                                                 │
+│ File: app.py, baris 354-430                                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Kode Kunci (PENTING):
+   # Hapus data cleaned LAMA untuk sesi ini (jika ada re-clean)
+   conn.execute('DELETE FROM cleaned_transaksi WHERE session_id=?', 
+                (session_id,))
+   conn.execute('DELETE FROM cleaning_stats WHERE session_id=?', 
+                (session_id,))
+
+   # Simpan data bersih
+   rows_clean = [
+       (session_id, row['id_transaksi'], row['tanggal'], 
+        row['produk'], int(row['jumlah']))
+       for _, row in df_clean.iterrows()
+   ]
+   conn.executemany(
+       '''INSERT INTO cleaned_transaksi (session_id, id_transaksi, tanggal, 
+          produk, jumlah) VALUES (?, ?, ?, ?, ?)''',
+       rows_clean
+   )
+
+PERILAKU:
+✅ Hanya menghapus data cleaned UNTUK SESI INI (tidak untuk sesi lain)
+✅ Insert data baru ke tabel cleaned_transaksi (append, bukan replace)
+✅ Update status sesi menjadi 'cleaned'
+✅ Jika sesi di-clean ULANG: data lama diganti dengan yang baru
+
+KESIMPULAN TAHAP 3:
+→ Data cleaned dari sesi LAIN tetap aman (tidak dihapus)
+→ Hanya data cleaned dari sesi YANG SAMA yang bisa dihapus/diganti saat re-clean
+
+
+================================================================================
+2. MEKANISME YANG MENYEBABKAN "DATA LAMA TIDAK TERLIHAT"
+================================================================================
+
+Fungsi Kunci: get_active_session() di app.py, baris 104-110
+
+   def get_active_session():
+       """Kembalikan sesi upload terakhir yang sudah selesai (status='cleaned')."""
+       conn = get_db_connection()
+       row = conn.execute(
+           "SELECT * FROM upload_session WHERE status='cleaned' 
+            ORDER BY id DESC LIMIT 1"
+       ).fetchone()
+       conn.close()
+       return row
+
+PENJELASAN:
+→ Fungsi ini HANYA mengambil sesi upload TERAKHIR (ORDER BY id DESC LIMIT 1)
+→ Kondisi: status HARUS 'cleaned' (sudah selesai cleaning)
+→ Sesi upload lama yang sudah di-clean tidak ditampilkan
+
+DAMPAK:
+→ Route /cleaned_data (baris 432-473) hanya menampilkan data dari 
+  get_active_session()
+→ Route /apriori (baris 512-561) hanya menganalisis data dari sesi aktif
+→ Route /moving_average (baris 564-595) hanya menganalisis data dari sesi aktif
+→ Route /index (dashboard) hanya menampilkan statistik sesi aktif
+
+
+================================================================================
+3. STRUKTUR TABEL DATABASE - RELASI SESI
+================================================================================
+
+Tabel: upload_session
+─────────────────────────────────────────────────────────────────────────────
+  id (PK)  | filename          | upload_time  | status   | column_mapping
+─────────────────────────────────────────────────────────────────────────────
+  1        | upload1.csv       | 2026-09-23   | cleaned  | {...}
+  2        | upload2.xlsx      | 2026-09-23   | cleaned  | {...}
+  3        | upload3.csv       | 2026-09-23   | pending  | {...}
+─────────────────────────────────────────────────────────────────────────────
+
+Tabel: cleaned_transaksi
+─────────────────────────────────────────────────────────────────────────────
+  id | session_id | id_transaksi | tanggal     | produk        | jumlah
+─────────────────────────────────────────────────────────────────────────────
+  1  | 1          | TR-001       | 2026-01-01  | Kain Katun    | 5
+  2  | 1          | TR-002       | 2026-01-02  | Gorden        | 3
+  .  | .          | .            | .           | .             | .
+  50 | 1          | TR-050       | 2026-05-20  | Tikar Piknik  | 2
+  51 | 2          | TR-051       | 2026-06-01  | Kain Katun    | 8
+  52 | 2          | TR-052       | 2026-06-02  | Batang Gorden | 4
+  .  | .          | .            | .           | .             | .
+─────────────────────────────────────────────────────────────────────────────
+
+DATA TETAP TERSIMPAN:
+→ Data dari session_id=1 tetap ada (50 baris)
+→ Data dari session_id=2 tetap ada (baris 51-52+)
+→ Data dari session_id=3 BELUM ada (status masih 'pending', belum di-clean)
+
+TAPI UI HANYA MENAMPILKAN:
+→ Data dari session_id TERBESAR dengan status='cleaned'
+→ Misalnya: session_id=2
+→ Data dari session_id=1 "tidak terlihat" tapi MASIH ADA di database
+
+
+================================================================================
+4. VERIFIKASI KODE - TIDAK ADA PENGHAPUSAN DATA UPLOAD LAMA
+================================================================================
+
+Pencarian string "DELETE FROM" di app.py:
+
+Baris 407-408:
+   conn.execute('DELETE FROM cleaned_transaksi WHERE session_id=?', 
+                (session_id,))
+   conn.execute('DELETE FROM cleaning_stats WHERE session_id=?', 
+                (session_id,))
+   → Hanya hapus data cleaned/stats UNTUK SESI TERSEBUT (re-clean)
+
+Baris 281-286:
+   conn.execute('''DELETE FROM raw_data_temp WHERE session_id NOT IN (
+       SELECT id FROM upload_session ORDER BY id DESC LIMIT 5
+   )''')
+   → Hanya hapus data raw temp >5 sesi terakhir (untuk hemat storage)
+
+ADA LAGI PENGHAPUSAN LAIN?
+❌ TIDAK ADA
+→ Tidak ada kode yang menghapus upload_session lama
+→ Tidak ada kode yang menghapus ALL data cleaned ketika upload baru
+→ Tidak ada route clear_data.py yang dipanggil otomatis
+
+
+================================================================================
+5. CEK: APAKAH clear_data.py DIPANGGIL OTOMATIS SAAT UPLOAD?
+================================================================================
+
+Pencarian "clear_data" di app.py:
+❌ TIDAK DITEMUKAN
+
+Pencarian "from clear_data" di app.py:
+❌ TIDAK DITEMUKAN
+
+Pencarian import clear_data di import statement:
+❌ TIDAK DITEMUKAN
+
+KESIMPULAN:
+→ clear_data.py TIDAK dipanggil otomatis saat upload
+→ clear_data.py hanya bisa dijalankan manual dengan `python clear_data.py`
+
+
+================================================================================
+6. CEK: UPLOAD_SESSION BARU ATAU MENGGANTIKAN YANG LAMA?
+================================================================================
+
+Kode di route /upload (baris 270-276):
+
+   cur = conn.execute(
+       '''INSERT INTO upload_session (filename, total_rows, column_mapping, 
+          raw_preview, status)
+          VALUES (?, ?, ?, ?, ?)''',
+       (file.filename, len(df_raw), json.dumps(mapping), 
+        df_raw.head(50).fillna('').to_json(...), 'pending')
+   )
+   session_id = cur.lastrowid
+
+ANALISIS:
+✅ Menggunakan INSERT (bukan UPDATE)
+✅ Setiap upload membuat record BARU di tabel upload_session
+✅ Tidak ada kondisi yang mencari/menghapus session lama sebelum INSERT
+
+KESIMPULAN:
+→ Setiap upload file MEMBUAT upload_session BARU
+→ Session lama TETAP tersimpan dengan status 'cleaned' atau 'pending'
+
+
+================================================================================
+7. HASIL AUDIT DATABASE
+================================================================================
+
+Daftar upload_session (dari database saat ini):
+───────────────────────────────────────────────
+Status: Database sudah dikosongkan sebelumnya (pembersihan data)
+
+Tabel upload_session: 0 baris
+Tabel cleaned_transaksi: 0 baris
+Tabel raw_data_temp: 1472 baris (dari upload sebelumnya, >5 sesi lalu)
+
+Kesimpulan: Ini adalah kondisi setelah clear_data.py dijalankan manual.
+
+
+================================================================================
+8. VERIFIKASI TIDAK ADA FUNGSI PEMBERSIHAN OTOMATIS LAIN
+================================================================================
+
+Pencarian "init_db()" dan "CREATE TABLE":
+→ Hanya membuat tabel jika tidak ada (IF NOT EXISTS)
+→ TIDAK menghapus data yang sudah ada
+
+Pencarian "DROP TABLE":
+❌ TIDAK DITEMUKAN
+
+Pencarian "TRUNCATE":
+❌ TIDAK DITEMUKAN
+
+Pencarian database reset otomatis:
+❌ TIDAK DITEMUKAN
+
+KESIMPULAN:
+→ Tidak ada fungsi yang reset database otomatis saat aplikasi jalan
+→ Tidak ada fungsi yang menghapus data lama saat upload baru
+
+
+================================================================================
+RINGKASAN AUDIT
+================================================================================
+
+PERTANYAAN 1: Ketika upload file baru, apakah data lama dihapus?
+JAWAB: ❌ TIDAK
+  Bukti: Kode hanya INSERT sesi baru, tidak ada DELETE sebelumnya
+
+PERTANYAAN 2: Apakah data lama ditimpa?
+JAWAB: ❌ TIDAK
+  Bukti: Tabel cleaned_transaksi menggunakan session_id untuk membedakan sesi
+
+PERTANYAAN 3: Apakah data baru ditambahkan (append)?
+JAWAB: ✅ YA, TETAPI hanya untuk sesi berbeda
+  - Upload file 1 → sesi_id=1, data di-append ke cleaned_transaksi
+  - Upload file 2 → session_id=2, data baru di-append dengan session_id=2 berbeda
+  - Data dari sesi_id=1 TETAP ADA tapi tidak ditampilkan di UI
+
+PERTANYAAN 4: Apakah database dibuat ulang?
+JAWAB: ❌ TIDAK
+  Bukti: init_db() hanya membuat tabel jika tidak ada (IF NOT EXISTS)
+
+PERTANYAAN 5: Kapan clear_data.py dipanggil?
+JAWAB: ❌ TIDAK PERNAH OTOMATIS
+  - Hanya bisa dijalankan manual
+  - Tidak ada import atau call ke clear_data.py di app.py
+
+PERTANYAAN 6: Upload membuat session baru atau menggantikan?
+JAWAB: ✅ MEMBUAT SESSION BARU SETIAP KALI
+  Bukti: INSERT baru, tidak ada UPDATE atau DELETE upload_session
+
+
+================================================================================
+PENJELASAN MASALAH: "DATA LAMA TIDAK TERLIHAT"
+================================================================================
+
+Skenario:
+1. Pengguna upload file1.csv → session_id=1
+2. Pengguna lakukan cleaning → data dari file1 tersimpan dengan session_id=1
+3. Pengguna upload file2.csv → session_id=2
+4. Pengguna lakukan cleaning → data dari file2 tersimpan dengan session_id=2
+5. Pengguna melihat di UI... "data dari file1 hilang!"
+
+PENJELASAN:
+→ Data dari file1 TIDAK hilang, masih ada di database dengan session_id=1
+→ Tapi UI hanya menampilkan data dari session_id terbaru (session_id=2)
+→ Fungsi get_active_session() hanya ambil 1 sesi terakhir dengan status='cleaned'
+
+ANALOGI:
+→ Seperti memiliki beberapa notebook, tapi pengguna hanya membaca notebook terbaru
+→ Notebook lama tidak hilang, tapi "tidak terlihat" karena tidak dibuka
+
+
+================================================================================
+9. DATA YANG TERSIMPAN SAAT INI
+================================================================================
+
+Setelah pemeriksaan database:
+
+Tabel transaksi:              0 baris ✓ (input manual, kosong)
+Tabel upload_session:         0 baris ✓ (kosong, sudah di-clear)
+Tabel cleaned_transaksi:      0 baris ✓ (kosong, sudah di-clear)
+Tabel cleaning_stats:         0 baris ✓ (kosong, sudah di-clear)
+Tabel raw_data_temp:       1472 baris (sisa data raw dari upload sebelumnya)
+
+Status: Database dalam kondisi BERSIH (setelah clear_data.py dijalankan)
+
+
+================================================================================
+REKOMENDASI UNTUK KEBUTUHAN SKRIPSI
+================================================================================
+
+OPSI 1: SATU FILE UPLOAD BERISI SELURUH DATA PENELITIAN ✅ DISARANKAN
+─────────────────────────────────────────────────────────────────────
+
+KELEBIHAN:
+✅ Data lengkap dalam satu sesi → konsistensi terjamin
+✅ Mudah dipahami: 1 file = 1 periode penelitian
+✅ Tidak perlu khawatir data tercampur dari upload berbeda
+✅ Laporan dan analisis referensi jelas: satu session_id
+✅ Trace back penelitian lebih mudah
+✅ Menghindari confusion saat multiple uploads
+
+CARA IMPLEMENTASI:
+1. Siapkan file CSV/Excel dengan SEMUA data transaksi Marema Textile
+   dalam periode penelitian yang diinginkan
+2. Upload SEKALI → preview → cleaning → analisis
+
+COCOK UNTUK:
+→ Data fix periode tertentu (misal: Jan-Mei 2026 atau tahun fiscal tertentu)
+→ Penelitian dengan dataset yang sudah final
+
+
+OPSI 2: MULTIPLE FILES DI-UPLOAD BERTAHAP - TIDAK DISARANKAN ❌
+─────────────────────────────────────────────────────────────────
+
+MASALAH:
+❌ Setiap upload menjadi sesi terpisah dengan session_id berbeda
+❌ Analisis Apriori & Moving Average hanya menggunakan sesi terakhir
+❌ Data dari upload sebelumnya "tidak terlihat" - membingungkan
+❌ Perlu modifikasi kode untuk menggabungkan multiple sessions
+❌ Statistik/cleaning stats terpisah per sesi
+
+JIKA TETAP HARUS MULTIPLE FILES:
+→ Perlu modifikasi code untuk:
+  • Menggabungkan data dari multiple sessions
+  • Update UI untuk menampilkan data dari semua sessions
+  • Update analisis untuk analisis cross-session
+  • Catat metadata tentang batch/periode setiap upload
+
+
+================================================================================
+REKOMENDASI IMPLEMENTASI UNTUK SKRIPSI
+================================================================================
+
+FASE 1: PERSIAPAN DATA
+─────────────────────
+1. Kumpulkan semua data transaksi Marema Textile dalam periode penelitian
+2. Buat satu file CSV/Excel dengan struktur:
+   - Kolom: Order ID, Tanggal, Nama Produk, Jumlah, Status Transaksi
+   - Format tanggal: YYYY-MM-DD atau DD/MM/YYYY
+   - Semua data dalam satu sheet/file
+
+3. Verifikasi data:
+   - Tidak ada baris kosong di kolom penting
+   - Format tanggal konsisten
+   - Jumlah adalah angka
+   - Status konsisten (selesai/batal/pending, dsb)
+
+FASE 2: UPLOAD & CLEANING
+──────────────────────────
+1. Upload file SATU KALI
+2. Review preview data dan mapping kolom (auto-detect)
+3. Jalankan cleaning process
+4. Verifikasi hasil cleaning di tab "Cleaned Data"
+
+FASE 3: ANALISIS
+────────────────
+1. Jalankan Apriori analysis (pola pembelian)
+2. Jalankan Moving Average (trend penjualan)
+3. Export hasil ke PDF
+
+FASE 4: DOKUMENTASI PENELITIAN
+────────────────────────────────
+1. Catat:
+   - Tanggal upload
+   - File source
+   - Total data mentah vs cleaned
+   - Alasan data dihapus (jika ada)
+   - Parameter analisis (min_support, min_confidence, window size)
+
+2. Simpan:
+   - File asli (CSV/Excel)
+   - PDF laporan dari aplikasi
+   - Screenshot session_id dan cleaning stats
+
+
+================================================================================
+KESIMPULAN FINAL
+================================================================================
+
+MEKANISME UPLOAD:
+→ Data lama TIDAK dihapus atau ditimpa
+→ Setiap upload membuat sesi BARU yang terpisah
+→ Data dapat di-append dengan mengupload file lain TETAPI akan terpisah
+→ UI hanya menampilkan sesi TERAKHIR (sehingga "data lama tidak terlihat")
+
+REKOMENDASI:
+→ Gunakan SATU FILE untuk semua data penelitian
+→ Lebih konsisten, lebih mudah dipahami, lebih sesuai untuk skripsi
+→ Jika perlu append data: perlu modifikasi code untuk merge multiple sessions
+
+NEXT STEP:
+→ Tunggu instruksi lebih lanjut dari pengguna
+→ Siap melakukan modifikasi code jika perlu multiple session support
+
+
+================================================================================
